@@ -98,7 +98,11 @@ class _ProAccessDialogState extends ConsumerState<_ProAccessDialog> {
       final result = await ref.read(authRepositoryProvider).startTrial();
       await ref
           .read(sessionControllerProvider.notifier)
-          .setAuthenticated(token: result.token, user: result.user);
+          .setAuthenticated(
+            token: result.token,
+            sessionId: result.sessionId,
+            user: result.user,
+          );
       if (!mounted) return;
       Navigator.of(context).pop();
       widget.onUnlocked?.call();

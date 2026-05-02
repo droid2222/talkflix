@@ -13,25 +13,62 @@ final socketServiceProvider = ChangeNotifierProvider<SocketService>((ref) {
 class SocketService extends ChangeNotifier {
   io.Socket? _socket;
   String? _token;
+  String? _expectedUserId;
+  String? _expectedSessionId;
+  String? _authenticatedUserId;
+  String? _authenticatedSessionId;
+  String? _lastIdentityError;
   String _status = 'disconnected';
+  int _connectionGeneration = 0;
+  Completer<bool>? _identityReadyCompleter;
 
   String get status => _status;
-  bool get isConnected => _socket?.connected == true;
+  bool get isConnected =>
+      _socket?.connected == true &&
+      _status == 'connected' &&
+      hasVerifiedIdentity;
+  bool get hasVerifiedIdentity =>
+      (_authenticatedUserId?.isNotEmpty ?? false) &&
+      (_authenticatedSessionId?.isNotEmpty ?? false);
+  String? get authenticatedUserId => _authenticatedUserId;
+  String? get authenticatedSessionId => _authenticatedSessionId;
+  String? get lastIdentityError => _lastIdentityError;
 
-  void connect(String token) {
+  void connect(
+    String token, {
+    required String expectedUserId,
+    required String expectedSessionId,
+  }) {
     if (_socket != null &&
         _token == token &&
-        (_socket!.connected || _status == 'connecting')) {
+        _expectedUserId == expectedUserId &&
+        _expectedSessionId == expectedSessionId &&
+        (_status == 'connecting' ||
+            _status == 'authenticating' ||
+            isVerifiedFor(
+              userId: expectedUserId,
+              sessionId: expectedSessionId,
+            ))) {
       return;
     }
 
-    _token = token;
+    _disposeSocket();
 
-    _socket?.dispose();
+    _token = token;
+    _expectedUserId = expectedUserId;
+    _expectedSessionId = expectedSessionId;
+    _authenticatedUserId = null;
+    _authenticatedSessionId = null;
+    _lastIdentityError = null;
+    _identityReadyCompleter = Completer<bool>();
+    final generation = ++_connectionGeneration;
+
     _socket = io.io(AppConfig.apiBaseUrl, <String, dynamic>{
       'path': '/socket.io',
       'transports': ['websocket', 'polling'],
       'autoConnect': false,
+      'forceNew': true,
+      'multiplex': false,
       'reconnection': true,
       'reconnectionAttempts': 8,
       'reconnectionDelay': 1000,
@@ -43,31 +80,84 @@ class SocketService extends ChangeNotifier {
 
     _socket!
       ..onConnect((_) {
+        if (!_isCurrentGeneration(generation)) return;
+        _status = 'authenticating';
+        notifyListeners();
+      })
+      ..on('auth:ready', (dynamic payload) {
+        if (!_isCurrentGeneration(generation)) return;
+        final data = payload is Map
+            ? Map<String, dynamic>.from(payload)
+            : const <String, dynamic>{};
+        final actualUserId = '${data['userId'] ?? ''}'.trim();
+        final actualSessionId = '${data['sessionId'] ?? ''}'.trim();
+        final expectedUserId = _expectedUserId ?? '';
+        final expectedSessionId = _expectedSessionId ?? '';
+        final identityMatches =
+            actualUserId.isNotEmpty &&
+            actualSessionId.isNotEmpty &&
+            actualUserId == expectedUserId &&
+            actualSessionId == expectedSessionId;
+        if (!identityMatches) {
+          _lastIdentityError =
+              'Realtime session mismatch. Please reconnect and try again.';
+          _status = 'error';
+          _completeIdentityReady(false);
+          notifyListeners();
+          _disposeSocket();
+          return;
+        }
+        _authenticatedUserId = actualUserId;
+        _authenticatedSessionId = actualSessionId;
+        _lastIdentityError = null;
         _status = 'connected';
+        _completeIdentityReady(true);
         notifyListeners();
       })
       ..onDisconnect((_) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
         _status = 'disconnected';
+        _completeIdentityReady(false);
         notifyListeners();
       })
       ..onConnectError((dynamic _) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
         _status = 'error';
+        _completeIdentityReady(false);
         notifyListeners();
       })
       ..onReconnectAttempt((dynamic _) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
         _status = 'connecting';
         notifyListeners();
       })
       ..onReconnect((dynamic _) {
-        _status = 'connected';
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
+        _status = 'authenticating';
         notifyListeners();
       })
       ..onReconnectFailed((dynamic _) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
         _status = 'error';
+        _completeIdentityReady(false);
         notifyListeners();
       })
       ..onReconnectError((dynamic _) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
         _status = 'error';
+        _completeIdentityReady(false);
         notifyListeners();
       })
       ..connect();
@@ -76,11 +166,51 @@ class SocketService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> ensureSessionIdentity({
+    required String token,
+    required String expectedUserId,
+    required String expectedSessionId,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    connect(
+      token,
+      expectedUserId: expectedUserId,
+      expectedSessionId: expectedSessionId,
+    );
+    if (isVerifiedFor(
+      userId: expectedUserId,
+      sessionId: expectedSessionId,
+    )) {
+      return true;
+    }
+    final completer = _identityReadyCompleter;
+    if (completer == null) return false;
+    try {
+      return await completer.future.timeout(timeout, onTimeout: () => false);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool isVerifiedFor({
+    required String userId,
+    required String sessionId,
+  }) {
+    if (!isConnected) return false;
+    return _authenticatedUserId == userId &&
+        _authenticatedSessionId == sessionId;
+  }
+
   void disconnect() {
-    _socket?.dispose();
-    _socket = null;
+    _disposeSocket();
     _token = null;
+    _expectedUserId = null;
+    _expectedSessionId = null;
+    _authenticatedUserId = null;
+    _authenticatedSessionId = null;
+    _lastIdentityError = null;
     _status = 'disconnected';
+    _completeIdentityReady(false);
     notifyListeners();
   }
 
@@ -148,5 +278,21 @@ class SocketService extends ChangeNotifier {
 
   void off(String event, [void Function(dynamic data)? handler]) {
     _socket?.off(event, handler);
+  }
+
+  bool _isCurrentGeneration(int generation) =>
+      generation == _connectionGeneration;
+
+  void _disposeSocket() {
+    _connectionGeneration += 1;
+    _socket?.dispose();
+    _socket = null;
+  }
+
+  void _completeIdentityReady(bool value) {
+    final completer = _identityReadyCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(value);
+    }
   }
 }

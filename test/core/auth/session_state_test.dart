@@ -27,10 +27,16 @@ void main() {
 
     test('authenticated state has token and user', () {
       final user = AppUser.fromJson({'id': '1', 'email': 'test@test.com'});
-      final state = SessionState.authenticated(token: 'tok_123', user: user);
+      final state = SessionState.authenticated(
+        token: 'tok_123',
+        sessionId: 'sid_123',
+        user: user,
+      );
       expect(state.isAuthenticated, isTrue);
       expect(state.isLoading, isFalse);
       expect(state.token, 'tok_123');
+      expect(state.sessionId, 'sid_123');
+      expect(state.hasVerifiedSessionIdentity, isTrue);
       expect(state.user, isNotNull);
       expect(state.user!.id, '1');
     });

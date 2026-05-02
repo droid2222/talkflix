@@ -33,6 +33,9 @@ class _TalkInboxScreenState extends ConsumerState<TalkInboxScreen> {
   late final void Function(dynamic data) _typingHandler;
   late final void Function(dynamic data) _messageHandler;
 
+  // Stored during _bindSocket so dispose() can clean up without touching ref.
+  SocketService? _socket;
+
   String _searchQuery = '';
   bool _notificationsMuted = false;
   bool _socketBound = false;
@@ -60,19 +63,18 @@ class _TalkInboxScreenState extends ConsumerState<TalkInboxScreen> {
 
   void _bindSocket() {
     if (_socketBound) return;
-    final socket = ref.read(socketServiceProvider);
-    socket.off('dm:typing', _typingHandler);
-    socket.off('dm:message', _messageHandler);
-    socket.on('dm:typing', _typingHandler);
-    socket.on('dm:message', _messageHandler);
+    _socket = ref.read(socketServiceProvider);
+    _socket!.off('dm:typing', _typingHandler);
+    _socket!.off('dm:message', _messageHandler);
+    _socket!.on('dm:typing', _typingHandler);
+    _socket!.on('dm:message', _messageHandler);
     _socketBound = true;
   }
 
   void _unbindSocket() {
     if (!_socketBound) return;
-    final socket = ref.read(socketServiceProvider);
-    socket.off('dm:typing', _typingHandler);
-    socket.off('dm:message', _messageHandler);
+    _socket?.off('dm:typing', _typingHandler);
+    _socket?.off('dm:message', _messageHandler);
     _socketBound = false;
   }
 
@@ -137,7 +139,8 @@ class _TalkInboxScreenState extends ConsumerState<TalkInboxScreen> {
   }
 
   void _leaveAllTypingRooms() {
-    final socket = ref.read(socketServiceProvider);
+    final socket = _socket;
+    if (socket == null) return;
     for (final threadId in _joinedTypingRooms.toList()) {
       socket.emit('dm:leave', <String, dynamic>{'threadId': threadId});
       _joinedTypingRooms.remove(threadId);

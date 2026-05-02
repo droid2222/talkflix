@@ -44,8 +44,11 @@ class TalkflixApp extends ConsumerWidget {
       final nextUserId = next.user?.id ?? '';
       final previousToken = previous?.token ?? '';
       final nextToken = next.token ?? '';
+      final previousSessionId = previous?.sessionId ?? '';
+      final nextSessionId = next.sessionId ?? '';
       final sessionIdentityChanged =
           previousUserId != nextUserId ||
+          previousSessionId != nextSessionId ||
           previousToken != nextToken ||
           previous?.isAuthenticated != next.isAuthenticated;
 
@@ -54,8 +57,16 @@ class TalkflixApp extends ConsumerWidget {
       }
 
       final liveSocket = ref.read(socketServiceProvider);
-      if (next.isAuthenticated && next.token != null) {
-        liveSocket.connect(next.token!);
+      if (next.isAuthenticated &&
+          next.token != null &&
+          next.user != null &&
+          next.sessionId != null &&
+          next.sessionId!.isNotEmpty) {
+        liveSocket.connect(
+          next.token!,
+          expectedUserId: next.user!.id,
+          expectedSessionId: next.sessionId!,
+        );
       } else {
         liveSocket.disconnect();
       }

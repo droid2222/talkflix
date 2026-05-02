@@ -203,11 +203,19 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                     ),
                   ),
                   FilledButton.tonalIcon(
-                    onPressed: session.token == null || session.token!.isEmpty
+                    onPressed: session.token == null ||
+                            session.token!.isEmpty ||
+                            session.user == null ||
+                            session.sessionId == null ||
+                            session.sessionId!.isEmpty
                         ? null
                         : () => ref
                               .read(socketServiceProvider)
-                              .connect(session.token!),
+                              .connect(
+                                session.token!,
+                                expectedUserId: session.user!.id,
+                                expectedSessionId: session.sessionId!,
+                              ),
                     icon: const Icon(Icons.wifi_tethering),
                     label: const Text('Reconnect socket'),
                   ),

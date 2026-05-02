@@ -81,7 +81,11 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
     if (result == null || !mounted) return;
     await ref
         .read(sessionControllerProvider.notifier)
-        .setAuthenticated(token: result.token, user: result.user);
+        .setAuthenticated(
+          token: result.token,
+          sessionId: result.sessionId,
+          user: result.user,
+        );
     if (mounted) context.go('/app/talk');
   }
 

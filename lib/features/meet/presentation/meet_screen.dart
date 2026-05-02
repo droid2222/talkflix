@@ -109,11 +109,17 @@ class _MeetScreenState extends ConsumerState<MeetScreen> {
     final updatedUser = await ref
         .read(authRepositoryProvider)
         .saveMeetLanguages(updatedLanguages);
-    final token = ref.read(sessionControllerProvider).token;
-    if (token != null && mounted) {
+    final sessionState = ref.read(sessionControllerProvider);
+    final token = sessionState.token;
+    final sessionId = sessionState.sessionId;
+    if (token != null && sessionId != null && mounted) {
       await ref
           .read(sessionControllerProvider.notifier)
-          .setAuthenticated(token: token, user: updatedUser);
+          .setAuthenticated(
+            token: token,
+            sessionId: sessionId,
+            user: updatedUser,
+          );
     }
     ref.read(meetFeedLanguageProvider.notifier).state = selected;
   }

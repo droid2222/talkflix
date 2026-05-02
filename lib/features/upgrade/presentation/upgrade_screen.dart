@@ -29,7 +29,11 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
       final result = await ref.read(authRepositoryProvider).startTrial();
       await ref
           .read(sessionControllerProvider.notifier)
-          .setAuthenticated(token: result.token, user: result.user);
+          .setAuthenticated(
+            token: result.token,
+            sessionId: result.sessionId,
+            user: result.user,
+          );
       setState(() => _message = 'Trial started successfully.');
     } on ApiException catch (error) {
       setState(() => _error = error.message);

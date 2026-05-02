@@ -109,6 +109,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   bool _rejoiningRoom = false;
   bool _localRendererReady = false;
   bool _socketBound = false;
+  // Stored during _bindSocket so dispose() can clean up without touching ref.
+  SocketService? _socketRef;
   int _broadcastRequestToken = 0;
   bool _localMicEnabled = true;
   bool _localVideoEnabled = false;
@@ -172,7 +174,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     super.dispose();
   }
 
-  SocketService get _socket => ref.read(socketServiceProvider);
+  // Use cached ref when available so dispose() callbacks never touch ref.
+  SocketService get _socket => _socketRef ?? ref.read(socketServiceProvider);
 
   void _handleCommentFocusChanged() {
     if (mounted) setState(() {});
@@ -327,6 +330,75 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return _liveAudioService.isConnected && _sfuConnected;
   }
 
+  Future<bool> _ensureVerifiedLiveSocket({
+    bool showError = true,
+  }) async {
+    final session = ref.read(sessionControllerProvider);
+    final token = session.token;
+    final sessionId = session.sessionId;
+    final user = session.user;
+    if (token == null ||
+        token.isEmpty ||
+        sessionId == null ||
+        sessionId.isEmpty ||
+        user == null ||
+        user.id.isEmpty) {
+      if (showError && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Your session needs to be refreshed. Please sign in again.',
+            ),
+          ),
+        );
+      }
+      return false;
+    }
+    final ready = await _socket.ensureSessionIdentity(
+      token: token,
+      expectedUserId: user.id,
+      expectedSessionId: sessionId,
+    );
+    if (!ready && showError && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _socket.lastIdentityError ??
+                'Realtime session is reconnecting. Please try again.',
+          ),
+        ),
+      );
+    }
+    return ready;
+  }
+
+  void _recoverFromLiveIdentityMismatch(String message) {
+    final session = ref.read(sessionControllerProvider);
+    final token = session.token;
+    final sessionId = session.sessionId;
+    final user = session.user;
+    _socket.disconnect();
+    if (token != null &&
+        token.isNotEmpty &&
+        sessionId != null &&
+        sessionId.isNotEmpty &&
+        user != null &&
+        user.id.isNotEmpty) {
+      unawaited(
+        _socket.ensureSessionIdentity(
+          token: token,
+          expectedUserId: user.id,
+          expectedSessionId: sessionId,
+        ),
+      );
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
   bool _computeTopologyReady(Map<String, dynamic>? room) {
     if (room == null) return false;
     final hostUserId = _resolveHostUserId(room);
@@ -474,6 +546,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   void _bindSocket() {
     if (_socketBound) return;
     _socketBound = true;
+    _socketRef = ref.read(socketServiceProvider);
     _socket.on('live:broadcasts', _onBroadcastList);
     _socket.on('live:broadcast:update', _onBroadcastUpdate);
     _socket.on('live:comment', _onComment);
@@ -1140,10 +1213,11 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     final me = ref.read(sessionControllerProvider).user;
     if (me == null ||
         title.trim().isEmpty ||
-        _creating ||
-        !_socket.isConnected) {
+        _creating) {
       return false;
     }
+    final sessionId = ref.read(sessionControllerProvider).sessionId ?? '';
+    if (!await _ensureVerifiedLiveSocket()) return false;
     final allowed = type == 'video'
         ? await _permissionService.ensureCameraAndMicrophone()
         : await _permissionService.ensureMicrophone();
@@ -1173,6 +1247,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         'isPrivate': isPrivate,
         'title': title.trim(),
         'userId': me.id,
+        'expectedUserId': me.id,
+        'expectedSessionId': sessionId,
         'host': me.displayName,
         'hostPhoto': me.profilePhotoUrl,
         'hostNationalityCode': me.nationalityCode,
@@ -1188,6 +1264,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           payload['broadcast'] as Map? ?? const <String, dynamic>{},
         ),
       );
+      final returnedHostUserId = '${broadcast['hostUserId'] ?? ''}'.trim();
+      if (returnedHostUserId.isNotEmpty && returnedHostUserId != me.id) {
+        _recoverFromLiveIdentityMismatch(
+          'Realtime session mismatch detected. The room was not created.',
+        );
+        return false;
+      }
       final mediaSession = payload['mediaSession'] is Map
           ? Map<String, dynamic>.from(payload['mediaSession'] as Map)
           : null;
@@ -1231,6 +1314,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
       return true;
     }
+    if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
+      _recoverFromLiveIdentityMismatch(
+        '${payload['message'] ?? 'Realtime session mismatch detected.'}',
+      );
+      return false;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -1245,12 +1334,16 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
 
   Future<void> _joinBroadcast(Map<String, dynamic> room) async {
     final me = ref.read(sessionControllerProvider).user;
-    if (me == null || !_socket.isConnected) return;
+    if (me == null) return;
+    final sessionId = ref.read(sessionControllerProvider).sessionId ?? '';
+    if (!await _ensureVerifiedLiveSocket()) return;
     _recordRtcTransition('join_broadcast start room=${room['id'] ?? ''}');
     final payload = await _socket.emitWithAckRetry(
       'live:broadcast:join',
       <String, dynamic>{
         'broadcastId': room['id'],
+        'expectedUserId': me.id,
+        'expectedSessionId': sessionId,
         'name': me.displayName,
         'photo': me.profilePhotoUrl,
       },
@@ -1303,6 +1396,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         await _syncRtcParticipants();
         unawaited(_refreshRoomTopologyAfterJoin());
       }
+      return;
+    }
+    if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
+      _recoverFromLiveIdentityMismatch(
+        '${payload['message'] ?? 'Realtime session mismatch detected.'}',
+      );
+      _recordRtcTransition('join_broadcast identity_mismatch');
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(

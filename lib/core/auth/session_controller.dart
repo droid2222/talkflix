@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../features/auth/data/auth_repository.dart';
 import '../config/storage_keys.dart';
 import '../network/api_exception.dart';
+import 'session_identity.dart';
 import 'session_state.dart';
 
 final sharedPreferencesProvider = FutureProvider<SharedPreferences>(
@@ -32,11 +33,25 @@ class SessionController extends StateNotifier<SessionState> {
       return;
     }
 
+    final sessionIdentity = parseSessionIdentityFromToken(token);
+    if (!sessionIdentity.isValid) {
+      await prefs.remove(StorageKeys.token);
+      state = const SessionState.unauthenticated(
+        errorMessage:
+            'Your session needs to be refreshed. Please sign in again.',
+      );
+      return;
+    }
+
     final repository = _ref.read(authRepositoryProvider);
 
     try {
       final user = await repository.fetchMe(tokenOverride: token);
-      state = SessionState.authenticated(token: token, user: user);
+      state = SessionState.authenticated(
+        token: token,
+        sessionId: sessionIdentity.sessionId,
+        user: user,
+      );
     } on ApiException catch (error) {
       if (error.isUnauthorized) {
         await prefs.remove(StorageKeys.token);
@@ -61,7 +76,11 @@ class SessionController extends StateNotifier<SessionState> {
       final result = await repository.login(email: email, password: password);
       final prefs = await _ref.read(sharedPreferencesProvider.future);
       await prefs.setString(StorageKeys.token, result.token);
-      state = SessionState.authenticated(token: result.token, user: result.user);
+      state = SessionState.authenticated(
+        token: result.token,
+        sessionId: result.sessionId,
+        user: result.user,
+      );
     } catch (error) {
       final message = error is ApiException
           ? userFriendlyMessage(error)
@@ -80,7 +99,21 @@ class SessionController extends StateNotifier<SessionState> {
     final user = await _ref
         .read(authRepositoryProvider)
         .fetchMe(tokenOverride: state.token);
-    state = SessionState.authenticated(token: state.token!, user: user);
+    final sessionId = state.sessionId;
+    if (sessionId == null || sessionId.isEmpty) {
+      final prefs = await _ref.read(sharedPreferencesProvider.future);
+      await prefs.remove(StorageKeys.token);
+      state = const SessionState.unauthenticated(
+        errorMessage:
+            'Your session needs to be refreshed. Please sign in again.',
+      );
+      return;
+    }
+    state = SessionState.authenticated(
+      token: state.token!,
+      sessionId: sessionId,
+      user: user,
+    );
   }
 
   Future<void> signOut() async {
@@ -89,9 +122,17 @@ class SessionController extends StateNotifier<SessionState> {
     state = const SessionState.unauthenticated();
   }
 
-  Future<void> setAuthenticated({required String token, required user}) async {
+  Future<void> setAuthenticated({
+    required String token,
+    required String sessionId,
+    required user,
+  }) async {
     final prefs = await _ref.read(sharedPreferencesProvider.future);
     await prefs.setString(StorageKeys.token, token);
-    state = SessionState.authenticated(token: token, user: user);
+    state = SessionState.authenticated(
+      token: token,
+      sessionId: sessionId,
+      user: user,
+    );
   }
 }

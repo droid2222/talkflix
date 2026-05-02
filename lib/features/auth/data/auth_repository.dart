@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 
 import '../../../core/auth/app_user.dart';
+import '../../../core/auth/session_identity.dart';
 import '../../../core/network/api_client.dart';
 
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
@@ -13,9 +14,14 @@ final authRepositoryProvider = Provider<AuthRepository>((ref) {
 });
 
 class AuthResult {
-  const AuthResult({required this.token, required this.user});
+  const AuthResult({
+    required this.token,
+    required this.sessionId,
+    required this.user,
+  });
 
   final String token;
+  final String sessionId;
   final AppUser user;
 }
 
@@ -35,16 +41,14 @@ class AuthRepository {
     );
 
     final token = data['token']?.toString() ?? '';
-    final user = await fetchMe(tokenOverride: token);
-    return AuthResult(token: token, user: user);
+    return _authResultFromToken(token);
   }
 
   Future<AuthResult> startTrial() async {
     final client = _ref.read(apiClientProvider);
     final data = await client.postJson('/billing/start-trial');
     final token = data['token']?.toString() ?? '';
-    final user = await fetchMe(tokenOverride: token);
-    return AuthResult(token: token, user: user);
+    return _authResultFromToken(token);
   }
 
   Future<void> forgotPassword(String email) async {
@@ -154,13 +158,25 @@ class AuthRepository {
     }
 
     final token = payload['token']?.toString() ?? '';
-    final user = await fetchMe(tokenOverride: token);
-    return AuthResult(token: token, user: user);
+    return _authResultFromToken(token);
   }
 
   MediaType? _contentTypeFromMime(String mimeType) {
     final parts = mimeType.split('/');
     if (parts.length != 2) return null;
     return MediaType(parts[0], parts[1]);
+  }
+
+  Future<AuthResult> _authResultFromToken(String token) async {
+    final sessionIdentity = parseSessionIdentityFromToken(token);
+    if (!sessionIdentity.isValid) {
+      throw Exception('Invalid session token.');
+    }
+    final user = await fetchMe(tokenOverride: token);
+    return AuthResult(
+      token: token,
+      sessionId: sessionIdentity.sessionId,
+      user: user,
+    );
   }
 }

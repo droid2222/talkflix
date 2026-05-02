@@ -436,6 +436,7 @@ void main() {
 
 final _authenticatedState = SessionState.authenticated(
   token: 'test_token_1234567890',
+  sessionId: 'session-123',
   user: const AppUser(
     id: 'user-1',
     email: 'test@example.com',
@@ -480,12 +481,40 @@ class _FakeSocketService extends SocketService {
   bool get isConnected => _connected;
 
   @override
-  void connect(String token) {
+  bool get hasVerifiedIdentity => _connected;
+
+  @override
+  void connect(
+    String token, {
+    required String expectedUserId,
+    required String expectedSessionId,
+  }) {
     connectCalls += 1;
     _status = 'connected';
     _connected = true;
     notifyListeners();
   }
+
+  @override
+  Future<bool> ensureSessionIdentity({
+    required String token,
+    required String expectedUserId,
+    required String expectedSessionId,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    connect(
+      token,
+      expectedUserId: expectedUserId,
+      expectedSessionId: expectedSessionId,
+    );
+    return true;
+  }
+
+  @override
+  bool isVerifiedFor({
+    required String userId,
+    required String sessionId,
+  }) => _connected;
 
   @override
   void disconnect() {
