@@ -1,0 +1,29 @@
+{
+  "configurations" : [
+    {
+      "id" : "9C8623F2-2023-4432-BD76-6C799BCA67DD",
+      "name" : "Configuration 1",
+      "options" : {
+        "distributor" : "com.apple.TestFlight",
+        "locationScenario" : {
+          "identifier" : "New York, NY, USA",
+          "referenceType" : "built-in"
+        },
+        "region" : "US"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Runner.xcodeproj",
+        "identifier" : "331C8080294A63A400263BE5",
+        "name" : "RunnerTests"
+      }
+    }
+  ],
+  "version" : 1
+}

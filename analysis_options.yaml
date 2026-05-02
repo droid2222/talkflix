@@ -1,0 +1,34 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    missing_return: error
+    dead_code: warning
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+
+linter:
+  rules:
+    # Code quality
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_locals: true
+    avoid_print: true
+    avoid_unnecessary_containers: true
+    sized_box_for_whitespace: true
+    use_key_in_widget_constructors: true
+    prefer_single_quotes: true
+
+    # Safety
+    cancel_subscriptions: true
+    close_sinks: true
+    unawaited_futures: true
+
+    # Style
+    always_declare_return_types: true
+    annotate_overrides: true
+    prefer_is_empty: true
+    prefer_is_not_empty: true
+    unnecessary_this: true
+    unnecessary_brace_in_string_interps: true
