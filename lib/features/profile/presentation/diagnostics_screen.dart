@@ -6,6 +6,8 @@ import 'package:go_router/go_router.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/realtime/direct_call_readiness_controller.dart';
+import '../../../core/realtime/direct_call_registration_controller.dart';
 import '../../../core/realtime/socket_service.dart';
 import '../../../core/widgets/feature_scaffold.dart';
 import 'qa_checklist_data.dart';
@@ -95,6 +97,10 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
   Widget build(BuildContext context) {
     final session = ref.watch(sessionControllerProvider);
     final socket = ref.watch(socketServiceProvider);
+    final directCallRegistration = ref.watch(
+      directCallRegistrationControllerProvider,
+    );
+    final directCallReadiness = ref.watch(directCallReadinessProvider);
     final qaProgress = ref.watch(qaChecklistProgressProvider);
     final token = session.token ?? '';
     final tokenPreview = token.isEmpty
@@ -203,7 +209,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                     ),
                   ),
                   FilledButton.tonalIcon(
-                    onPressed: session.token == null ||
+                    onPressed:
+                        session.token == null ||
                             session.token!.isEmpty ||
                             session.user == null ||
                             session.sessionId == null ||
@@ -255,6 +262,141 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
           ),
         ),
         SectionCard(
+          title: 'Direct call readiness',
+          subtitle:
+              'Verifies that this device can receive incoming direct calls.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _InfoRow(
+                label: 'Platform',
+                value: directCallRegistration.platform,
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Relay transport available',
+                value: directCallReadiness.relayAvailable ? 'Yes' : 'No',
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Overall direct-call gate',
+                value: directCallReadiness.canUseDirectCalls
+                    ? 'Ready'
+                    : directCallReadiness.userMessage,
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Expected push provider',
+                value: directCallRegistration.expectedPushProvider.isEmpty
+                    ? 'Unavailable'
+                    : directCallRegistration.expectedPushProvider,
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Local push token',
+                value: directCallRegistration.localTokenPreview,
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Registered for current token',
+                value: directCallRegistration.registeredForCurrentToken
+                    ? 'Yes'
+                    : 'No',
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Background-call capable',
+                value: directCallRegistration.backgroundCallable ? 'Yes' : 'No',
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Healthy background-call devices',
+                value:
+                    '${directCallReadiness.serverSummary.healthyBackgroundCallableDeviceCount}',
+              ),
+              const SizedBox(height: 12),
+              _InfoRow(
+                label: 'Enabled direct-call devices',
+                value: '${directCallRegistration.enabledDeviceCount}',
+              ),
+              if (directCallRegistration.currentDevice != null) ...[
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Current device token suffix',
+                  value:
+                      directCallRegistration.currentDevice!.tokenSuffix.isEmpty
+                      ? 'Unavailable'
+                      : directCallRegistration.currentDevice!.tokenSuffix,
+                ),
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Current device push health',
+                  value:
+                      directCallRegistration
+                          .currentDevice!
+                          .healthyForBackgroundIncoming
+                      ? 'Healthy'
+                      : 'Needs attention',
+                ),
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Last verified at',
+                  value:
+                      directCallRegistration.currentDevice!.lastVerifiedAt ??
+                      'Unavailable',
+                ),
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Last push success',
+                  value:
+                      directCallRegistration.currentDevice!.lastPushSuccessAt ??
+                      'Unavailable',
+                ),
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Last push failure',
+                  value:
+                      directCallRegistration.currentDevice!.lastPushFailureAt ??
+                      'Unavailable',
+                ),
+              ],
+              if (directCallRegistration.lastError != null) ...[
+                const SizedBox(height: 12),
+                _InfoRow(
+                  label: 'Last registration error',
+                  value: directCallRegistration.lastError!,
+                ),
+              ],
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: directCallRegistration.syncing
+                        ? null
+                        : () {
+                            ref.invalidate(directCallServerReadinessProvider);
+                            ref
+                                .read(
+                                  directCallRegistrationControllerProvider
+                                      .notifier,
+                                )
+                                .sync(force: true);
+                          },
+                    icon: const Icon(Icons.call),
+                    label: Text(
+                      directCallRegistration.syncing
+                          ? 'Checking...'
+                          : 'Refresh call readiness',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        SectionCard(
           title: 'QA shortcuts',
           subtitle:
               'Jump directly into the highest-risk product flows and use copied session IDs when comparing devices or logs.',
@@ -293,7 +435,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                   ),
                   FilledButton.tonal(
                     onPressed: () => context.go('/app/talk'),
-                    child: const Text('Open Talk'),
+                    child: const Text('Open Talks'),
                   ),
                   FilledButton.tonal(
                     onPressed: () => context.go('/app/meet/anon'),

@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:permission_handler/permission_handler.dart';
 
 class MediaPermissionService {
@@ -10,6 +13,16 @@ class MediaPermissionService {
   Future<bool> ensureMicrophone() async {
     final microphone = await Permission.microphone.request();
     return microphone.isGranted;
+  }
+
+  Future<void> warmBluetoothConnectPermission() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      final status = await Permission.bluetoothConnect.status;
+      if (status.isDenied) {
+        await Permission.bluetoothConnect.request();
+      }
+    } catch (_) {}
   }
 
   Future<bool> ensurePhotos() async {

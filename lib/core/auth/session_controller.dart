@@ -116,6 +116,58 @@ class SessionController extends StateNotifier<SessionState> {
     );
   }
 
+  void updateCoverPhotos({
+    required List<String> coverPhotoUrls,
+    List<String> coverPhotoThumbUrls = const [],
+    bool coverPhotosLocked = false,
+  }) {
+    final currentUser = state.user;
+    final token = state.token;
+    final sessionId = state.sessionId;
+    if (!state.isAuthenticated ||
+        currentUser == null ||
+        token == null ||
+        sessionId == null ||
+        sessionId.isEmpty) {
+      return;
+    }
+
+    state = SessionState.authenticated(
+      token: token,
+      sessionId: sessionId,
+      user: currentUser.copyWith(
+        coverPhotoUrls: coverPhotoUrls,
+        coverPhotoThumbUrls: coverPhotoThumbUrls,
+        coverPhotosLocked: coverPhotosLocked,
+      ),
+    );
+  }
+
+  void updateRelationshipStatus({
+    required String relationshipStatus,
+    required bool relationshipStatusVisible,
+  }) {
+    final currentUser = state.user;
+    final token = state.token;
+    final sessionId = state.sessionId;
+    if (!state.isAuthenticated ||
+        currentUser == null ||
+        token == null ||
+        sessionId == null ||
+        sessionId.isEmpty) {
+      return;
+    }
+
+    state = SessionState.authenticated(
+      token: token,
+      sessionId: sessionId,
+      user: currentUser.copyWith(
+        relationshipStatus: relationshipStatus,
+        relationshipStatusVisible: relationshipStatusVisible,
+      ),
+    );
+  }
+
   Future<void> signOut() async {
     final prefs = await _ref.read(sharedPreferencesProvider.future);
     await prefs.remove(StorageKeys.token);

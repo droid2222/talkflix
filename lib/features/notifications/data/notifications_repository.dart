@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_client.dart';
 import 'app_notification.dart';
 
-final notificationsRepositoryProvider = Provider<NotificationsRepository>((ref) {
+final notificationsRepositoryProvider = Provider<NotificationsRepository>((
+  ref,
+) {
   return NotificationsRepository(ref);
 });
 
@@ -13,7 +15,9 @@ class NotificationsRepository {
   final Ref _ref;
 
   Future<List<AppNotification>> fetchNotifications() async {
-    final data = await _ref.read(apiClientProvider).getJson('/me/notifications');
+    final data = await _ref
+        .read(apiClientProvider)
+        .getJson('/me/notifications');
     final items = data['notifications'] as List<dynamic>? ?? const [];
     return items
         .whereType<Map<String, dynamic>>()

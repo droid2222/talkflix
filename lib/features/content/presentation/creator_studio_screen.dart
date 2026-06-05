@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../data/content_repository.dart';
@@ -8,7 +11,8 @@ class CreatorStudioScreen extends ConsumerStatefulWidget {
   const CreatorStudioScreen({super.key});
 
   @override
-  ConsumerState<CreatorStudioScreen> createState() => _CreatorStudioScreenState();
+  ConsumerState<CreatorStudioScreen> createState() =>
+      _CreatorStudioScreenState();
 }
 
 class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
@@ -56,15 +60,15 @@ class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
     final video = _selectedVideo;
     final title = _titleController.text.trim();
     if (title.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Title is required.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Title is required.')));
       return;
     }
     if (video == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Please pick a video first.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please pick a video first.')),
+      );
       return;
     }
 
@@ -103,6 +107,7 @@ class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Video published successfully.')),
       );
+      unawaited(context.push('/app/content/videos/${draft.id}'));
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -172,7 +177,9 @@ class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
             onPressed: _submitting ? null : _pickVideo,
             icon: const Icon(Icons.video_library_outlined),
             label: Text(
-              _selectedVideo == null ? 'Pick Video' : 'Change Video (${_selectedVideo!.name})',
+              _selectedVideo == null
+                  ? 'Pick Video'
+                  : 'Change Video (${_selectedVideo!.name})',
             ),
           ),
           const SizedBox(height: 16),
@@ -185,7 +192,9 @@ class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.publish_rounded),
-            label: Text(_submitting ? 'Publishing...' : 'Create, Upload, Publish'),
+            label: Text(
+              _submitting ? 'Publishing...' : 'Create, Upload, Publish',
+            ),
           ),
           const SizedBox(height: 12),
           Text(_status),
@@ -194,4 +203,3 @@ class _CreatorStudioScreenState extends ConsumerState<CreatorStudioScreen> {
     );
   }
 }
-

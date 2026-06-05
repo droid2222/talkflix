@@ -2,22 +2,33 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
+import '../../../core/config/storage_keys.dart';
+import '../../../core/formatters/compact_count_formatter.dart';
 import '../../../core/media/media_permission_service.dart';
 import '../../../core/media/media_utils.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/network/api_exception.dart';
 import '../../../core/realtime/socket_service.dart';
 import '../../../core/realtime/webrtc_service.dart';
 import '../../../core/widgets/participant_action_target.dart';
 import '../../../core/widgets/realtime_warning_banner.dart';
+import '../../content/data/content_repository.dart';
+import '../../talk/data/direct_chat_repository.dart';
+import '../../talk/data/talk_repository.dart';
+import '../../talk/presentation/chat_recipient_picker.dart';
+import '../application/live_room_session_controller.dart';
 import '../data/live_audio_service.dart';
 import '../application/live_room_controller.dart';
 import '../domain/live_role.dart';
@@ -25,15 +36,39 @@ import '../../auth/data/signup_options.dart';
 import '../../upgrade/presentation/pro_access_sheet.dart';
 import 'flying_reactions.dart';
 
+/// True while the user is inside any live broadcast room on the Live tab.
+/// Drives shell chrome (e.g. hiding the bottom navigation bar) for immersive
+/// audio and video rooms.
 final liveAudioRoomActiveProvider = StateProvider<bool>((ref) => false);
-final liveModeProvider = StateProvider<String>((ref) => 'broadcast');
 final liveBrowseTypeProvider = StateProvider<String>((ref) => 'audio');
 final liveBroadcastCacheProvider = StateProvider<List<Map<String, dynamic>>>(
   (ref) => const [],
 );
 
+const Set<String> _liveBackgroundThemes = <String>{
+  'gold',
+  'red',
+  'blue',
+  'black',
+};
+const Set<String> _liveCommentThemes = <String>{
+  'glass',
+  'soft',
+  'aqua',
+  'berry',
+  'mint',
+};
+const Set<String> _liveMicEffects = <String>{
+  'pulse',
+  'halo',
+  'echo',
+  'spotlight',
+};
+
 class LiveScreen extends ConsumerStatefulWidget {
-  const LiveScreen({super.key});
+  const LiveScreen({super.key, this.initialBroadcastId});
+
+  final String? initialBroadcastId;
 
   @override
   ConsumerState<LiveScreen> createState() => _LiveScreenState();
@@ -41,16 +76,14 @@ class LiveScreen extends ConsumerStatefulWidget {
 
 class _LiveScreenState extends ConsumerState<LiveScreen> {
   final _permissionService = MediaPermissionService();
-  final _liveAudioService = LiveAudioService();
   final _commentController = TextEditingController();
   final _commentFocusNode = FocusNode();
   final _immersiveCommentsController = ScrollController();
+  final _audioRoomPageController = PageController();
+  final _videoRoomPageController = PageController();
   final _reactionController = StreamController<String>.broadcast();
-  static const _audioRoomBackground = Color(0xFF111315);
-  static const _audioRoomPanel = Color(0xFF1A1D21);
-  static const _audioRoomBubble = Color(0xFF1C1F24);
+  static const _audioRoomPanel = Color(0xFF2C1E00);
   static const _audioRoomAccent = talkflixPrimary;
-  static const _audioRoomChip = Color(0xFF93000A);
   RTCVideoRenderer? _localRenderer;
   final Map<String, RTCVideoRenderer> _remoteRenderers = {};
   final Map<String, RTCPeerConnection> _peerConnections = {};
@@ -64,6 +97,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   Timer? _speakingEmitTimer;
   Timer? _audioRecoveryTimer;
   Timer? _roomHealthTimer;
+  Timer? _browseListRefreshTimer;
+  Timer? _pollClearTimer;
+  Timer? _guestPreviewCountdownTimer;
   final Map<String, Timer> _speakingDecayTimers = {};
   bool _lastLocalSpeaking = false;
   DateTime? _lastSpeakingEmitAt;
@@ -80,6 +116,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   Future<void>? _sfuConnectInFlight;
   final Map<String, int> _latestSpeakingSeqByUser = <String, int>{};
   final List<String> _rtcTransitionLog = <String>[];
+  String? _pendingSharedBroadcastId;
+  bool _sharedBroadcastLookupRetried = false;
+  bool _joiningPendingSharedBroadcast = false;
   static const int _rtcTransitionLogLimit = 20;
   static const _rtcSyncDebounceWindow = Duration(milliseconds: 180);
   static const _speakingEmitMinInterval = Duration(milliseconds: 850);
@@ -103,14 +142,21 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   Map<String, dynamic>? _activeRoom;
   List<Map<String, dynamic>> _comments = const [];
   List<Map<String, dynamic>> _joinRequests = const [];
+  Map<String, dynamic>? _activePoll;
+  String? _myPollVoteOptionId;
+  String? _lastShownNoticeId;
+  bool _liveNoticeDialogOpen = false;
   bool _loadingList = true;
   bool _creating = false;
   bool _handRaised = false;
   bool _rejoiningRoom = false;
   bool _localRendererReady = false;
+  RTCVideoRenderer? _hostHeroRenderer;
+  bool _hostHeroRendererReady = false;
   bool _socketBound = false;
   // Stored during _bindSocket so dispose() can clean up without touching ref.
   SocketService? _socketRef;
+  LiveAudioService? _liveAudioServiceRef;
   int _broadcastRequestToken = 0;
   bool _localMicEnabled = true;
   bool _localVideoEnabled = false;
@@ -118,17 +164,55 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   bool _wasOnStage = false;
   bool _isFollowingHost = false;
   bool _followingHostBusy = false;
+  int _heartCount = 0;
+  int _audioRoomPageIndex = 0;
+  int _videoRoomPageIndex = 0;
+  bool _guestPreviewJoinInFlight = false;
+  bool _guestPreviewExpired = false;
+  DateTime? _guestPreviewEndsAt;
+  String _myCommentTheme = 'glass';
+  String _myMicEffect = 'pulse';
+
+  /// Cached plain-bool set at room-join time. Used in socket callbacks where
+  /// provider reads may return stale/initial state (autoDispose caveat).
+  bool _amHosting = false;
   String _socketStatus = 'disconnected';
-  String _liveMode = 'broadcast';
   String _browseType = 'audio';
+  String? _browseLanguage;
   String _language = 'English';
   final Set<String> _activeSpeakers = {};
+
+  LiveAudioService get _liveAudioService {
+    final cached = _liveAudioServiceRef;
+    if (cached != null) return cached;
+    final resolved = ref.read(liveAudioServiceProvider);
+    _liveAudioServiceRef = resolved;
+    return resolved;
+  }
+
+  bool get _shouldUseGuestLivePreview {
+    final broadcastId = _pendingSharedBroadcastId ?? widget.initialBroadcastId;
+    if (!kIsWeb || broadcastId == null || broadcastId.trim().isEmpty) {
+      return false;
+    }
+    return !ref.read(sessionControllerProvider).isAuthenticated;
+  }
+
+  int get _guestPreviewSecondsRemaining {
+    final endsAt = _guestPreviewEndsAt;
+    if (endsAt == null) return 0;
+    final remaining = endsAt.difference(DateTime.now()).inSeconds;
+    return remaining < 0 ? 0 : remaining;
+  }
 
   @override
   void initState() {
     super.initState();
-    _liveMode = ref.read(liveModeProvider);
+    _pendingSharedBroadcastId = _normalizeBroadcastId(
+      widget.initialBroadcastId,
+    );
     _browseType = ref.read(liveBrowseTypeProvider);
+    _restorePersistedLiveRoomSession();
     final cached = ref.read(liveBroadcastCacheProvider);
     if (cached.isNotEmpty) {
       _broadcasts = cached;
@@ -137,12 +221,115 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _socketStatus = _socket.status;
     _socket.addListener(_handleSocketStatusChanged);
     _commentFocusNode.addListener(_handleCommentFocusChanged);
+    unawaited(_loadMyCommentTheme());
+    unawaited(_loadMyMicEffect());
+    if (_shouldUseGuestLivePreview) {
+      _socket.connectGuestLivePreview(broadcastId: _pendingSharedBroadcastId!);
+      _socketStatus = _socket.status;
+    }
     _bindSocket();
+    _queueSharedBroadcastResolution();
+    if (_activeRoom != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _activeRoom == null) return;
+        ref.read(liveRoomSessionProvider.notifier).setMinimized(false);
+        _syncRoomChromeState();
+        unawaited(_resumePersistedLiveRoomSession());
+      });
+    }
+    _syncBrowseListRefreshTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant LiveScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextBroadcastId = _normalizeBroadcastId(widget.initialBroadcastId);
+    if (nextBroadcastId ==
+        _normalizeBroadcastId(oldWidget.initialBroadcastId)) {
+      return;
+    }
+    _pendingSharedBroadcastId = nextBroadcastId;
+    _sharedBroadcastLookupRetried = false;
+    _queueSharedBroadcastResolution();
+  }
+
+  String? _normalizeBroadcastId(String? value) {
+    final normalized = (value ?? '').trim();
+    if (normalized.isEmpty) return null;
+    return normalized;
+  }
+
+  Map<String, dynamic>? _broadcastById(String broadcastId) {
+    for (final broadcast in _broadcasts) {
+      if ('${broadcast['id'] ?? ''}'.trim() == broadcastId) {
+        return broadcast;
+      }
+    }
+    return null;
+  }
+
+  void _queueSharedBroadcastResolution() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_maybeResolveSharedBroadcast());
+    });
+  }
+
+  Future<void> _maybeResolveSharedBroadcast() async {
+    final targetBroadcastId = _pendingSharedBroadcastId;
+    if (!mounted || targetBroadcastId == null || targetBroadcastId.isEmpty) {
+      return;
+    }
+    final activeBroadcastId = '${_activeRoom?['id'] ?? ''}'.trim();
+    if (activeBroadcastId == targetBroadcastId) {
+      _pendingSharedBroadcastId = null;
+      _sharedBroadcastLookupRetried = false;
+      return;
+    }
+    if (activeBroadcastId.isNotEmpty) {
+      _pendingSharedBroadcastId = null;
+      _sharedBroadcastLookupRetried = false;
+      return;
+    }
+    if (_joiningPendingSharedBroadcast) {
+      return;
+    }
+    final room = _broadcastById(targetBroadcastId);
+    if (room == null) {
+      if (_loadingList) return;
+      if (!_sharedBroadcastLookupRetried) {
+        _sharedBroadcastLookupRetried = true;
+        await _requestBroadcasts();
+        return;
+      }
+      _pendingSharedBroadcastId = null;
+      _sharedBroadcastLookupRetried = false;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This live room is unavailable.')),
+      );
+      return;
+    }
+    _joiningPendingSharedBroadcast = true;
+    try {
+      if (_shouldUseGuestLivePreview) {
+        await _joinGuestLivePreview(room);
+      } else {
+        await _joinBroadcast(room);
+      }
+    } finally {
+      _joiningPendingSharedBroadcast = false;
+    }
+    if (!mounted) return;
+    if ('${_activeRoom?['id'] ?? ''}'.trim() == targetBroadcastId) {
+      _pendingSharedBroadcastId = null;
+    }
+    _sharedBroadcastLookupRetried = false;
   }
 
   @override
   void dispose() {
-    ref.read(liveAudioRoomActiveProvider.notifier).state = false;
+    final preserveMinimizedSession = _shouldPreserveMinimizedAudioSession;
     _unbindSocket();
     _socket.removeListener(_handleSocketStatusChanged);
     _commentFocusNode
@@ -153,15 +340,22 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _speakingEmitTimer?.cancel();
     _audioRecoveryTimer?.cancel();
     _roomHealthTimer?.cancel();
+    _browseListRefreshTimer?.cancel();
+    _pollClearTimer?.cancel();
+    _guestPreviewCountdownTimer?.cancel();
     for (final timer in _speakingDecayTimers.values) {
       timer.cancel();
     }
     _speakingDecayTimers.clear();
     _commentController.dispose();
     _immersiveCommentsController.dispose();
+    _audioRoomPageController.dispose();
+    _videoRoomPageController.dispose();
     unawaited(_reactionController.close());
-    unawaited(_liveAudioService.disconnect());
-    unawaited(_disposeRtc());
+    if (!preserveMinimizedSession) {
+      unawaited(_liveAudioService.disconnect());
+      unawaited(_disposeRtc());
+    }
     final localRenderer = _localRenderer;
     _localRenderer = null;
     if (_localRendererReady) {
@@ -181,9 +375,56 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _loadMyCommentTheme() async {
+    final prefs = await ref.read(sharedPreferencesProvider.future);
+    final saved = (prefs.getString(StorageKeys.liveCommentTheme) ?? 'glass')
+        .trim()
+        .toLowerCase();
+    if (!mounted) return;
+    setState(() {
+      _myCommentTheme = _liveCommentThemes.contains(saved) ? saved : 'glass';
+    });
+  }
+
+  Future<void> _saveMyCommentTheme(String value) async {
+    final normalized = value.trim().toLowerCase();
+    if (!_liveCommentThemes.contains(normalized)) return;
+    final prefs = await ref.read(sharedPreferencesProvider.future);
+    await prefs.setString(StorageKeys.liveCommentTheme, normalized);
+    if (!mounted) return;
+    setState(() => _myCommentTheme = normalized);
+  }
+
+  Future<void> _loadMyMicEffect() async {
+    final prefs = await ref.read(sharedPreferencesProvider.future);
+    final saved = (prefs.getString(StorageKeys.liveMicEffect) ?? 'pulse')
+        .trim()
+        .toLowerCase();
+    if (!mounted) return;
+    setState(() {
+      _myMicEffect = _liveMicEffects.contains(saved) ? saved : 'pulse';
+    });
+  }
+
+  Future<void> _saveMyMicEffect(String value) async {
+    final normalized = value.trim().toLowerCase();
+    if (!_liveMicEffects.contains(normalized)) return;
+    final prefs = await ref.read(sharedPreferencesProvider.future);
+    await prefs.setString(StorageKeys.liveMicEffect, normalized);
+    if (!mounted) return;
+    setState(() => _myMicEffect = normalized);
+  }
+
   void _syncRoomChromeState() {
-    ref.read(liveAudioRoomActiveProvider.notifier).state =
-        _activeRoom != null && '${_activeRoom?['type'] ?? 'audio'}' == 'audio';
+    ref.read(liveAudioRoomActiveProvider.notifier).state = _activeRoom != null;
+    ref
+        .read(liveRoomSessionProvider.notifier)
+        .sync(
+          room: _activeRoom,
+          localMicEnabled: _localMicEnabled,
+          handRaised: _handRaised,
+          browseType: _browseType,
+        );
     ref
         .read(liveRoomControllerProvider.notifier)
         .hydrate(
@@ -191,7 +432,49 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           meId: _meId,
           localMicEnabled: _localMicEnabled,
         );
+    // Cache host status as a plain bool so socket callbacks can read it
+    // without touching autoDispose providers (which return initial state
+    // when read outside a watch context).
+    final myId = _meId;
+    _amHosting = myId.isNotEmpty && _resolveHostUserId(_activeRoom) == myId;
     _syncRoomHealthMonitor();
+  }
+
+  bool get _shouldPreserveMinimizedAudioSession {
+    final session = ref.read(liveRoomSessionProvider);
+    return session.minimized &&
+        session.isAudioRoom &&
+        _activeRoom != null &&
+        !_roomUsesVideo &&
+        _usesSfuAudioPath;
+  }
+
+  void _restorePersistedLiveRoomSession() {
+    final session = ref.read(liveRoomSessionProvider);
+    final room = session.room;
+    if (room == null) return;
+    _activeRoom = _cloneRoomSnapshot(room);
+    _browseType = session.browseType;
+    _localMicEnabled = session.localMicEnabled;
+    _handRaised = session.handRaised;
+    _sfuConnected = _liveAudioService.isConnected;
+    _loadingList = false;
+    _refreshTopologyReady(_activeRoom);
+  }
+
+  Future<void> _resumePersistedLiveRoomSession() async {
+    final room = _activeRoom;
+    if (room == null) return;
+    _sfuConnected = _liveAudioService.isConnectedToRoom('${room['id'] ?? ''}');
+    if (_socketStatus == 'connected') {
+      await _refreshActiveRoomViaJoin();
+    }
+    if (!mounted || _activeRoom == null) return;
+    if (_usesSfuAudioPath) {
+      await _refreshLiveAudioPublishState();
+    } else {
+      await _syncRtcParticipants();
+    }
   }
 
   void _syncRoomHealthMonitor() {
@@ -206,6 +489,23 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       if (!mounted || _activeRoom == null) return;
       if (_socketStatus != 'connected') return;
       unawaited(_requestBroadcasts());
+    });
+  }
+
+  void _syncBrowseListRefreshTimer() {
+    final shouldRefresh =
+        mounted && _activeRoom == null && _socketStatus == 'connected';
+    if (!shouldRefresh) {
+      _browseListRefreshTimer?.cancel();
+      _browseListRefreshTimer = null;
+      return;
+    }
+    _browseListRefreshTimer ??= Timer.periodic(const Duration(seconds: 6), (_) {
+      if (!mounted || _activeRoom != null || _socketStatus != 'connected') {
+        _syncBrowseListRefreshTimer();
+        return;
+      }
+      unawaited(_requestBroadcasts(showLoadingOnFailure: false));
     });
   }
 
@@ -289,7 +589,25 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (resolvedHost.isNotEmpty) {
       normalized['hostUserId'] = resolvedHost;
     }
+    normalized['comments'] =
+        (normalized['comments'] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .where((item) => !_isHiddenLiveSystemComment(item))
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList(growable: true);
+    normalized['activeNotice'] = normalized['activeNotice'] is Map
+        ? Map<String, dynamic>.from(normalized['activeNotice'] as Map)
+        : null;
+    normalized['activePoll'] = normalized['activePoll'] is Map
+        ? Map<String, dynamic>.from(normalized['activePoll'] as Map)
+        : null;
     return normalized;
+  }
+
+  bool _isHiddenLiveSystemComment(Map<dynamic, dynamic> item) {
+    final author = '${item['author'] ?? ''}'.trim().toLowerCase();
+    final text = '${item['text'] ?? ''}'.trim().toLowerCase();
+    return author == 'system' && text == 'broadcast started.';
   }
 
   int _roomVersionFrom(Map<String, dynamic>? room) {
@@ -330,9 +648,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return _liveAudioService.isConnected && _sfuConnected;
   }
 
-  Future<bool> _ensureVerifiedLiveSocket({
-    bool showError = true,
-  }) async {
+  Future<bool> _ensureVerifiedLiveSocket({bool showError = true}) async {
     final session = ref.read(sessionControllerProvider);
     final token = session.token;
     final sessionId = session.sessionId;
@@ -437,6 +753,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _loadingList = false;
     });
     _cacheBroadcasts(next);
+    _syncBrowseListRefreshTimer();
   }
 
   void _removeBroadcastLocally(String broadcastId) {
@@ -449,6 +766,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _loadingList = false;
     });
     _cacheBroadcasts(next);
+    _syncBrowseListRefreshTimer();
   }
 
   Future<void> _showBroadcastEndedCard() async {
@@ -543,6 +861,51 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _localRendererReady = true;
   }
 
+  Future<void> _disposeHostHeroRenderer() async {
+    if (!_hostHeroRendererReady && _hostHeroRenderer == null) return;
+    final hero = _hostHeroRenderer;
+    _hostHeroRenderer = null;
+    _hostHeroRendererReady = false;
+    if (hero == null) return;
+    try {
+      hero.srcObject = null;
+      await hero.dispose();
+    } catch (_) {}
+  }
+
+  Future<void> _ensureHostHeroRenderer() async {
+    if (_hostHeroRendererReady) return;
+    final renderer = RTCVideoRenderer();
+    await renderer.initialize();
+    if (!mounted) {
+      await renderer.dispose();
+      return;
+    }
+    _hostHeroRenderer = renderer;
+    _hostHeroRendererReady = true;
+  }
+
+  Future<void> _syncHostHeroVideo() async {
+    final room = _activeRoom;
+    if (room == null || !_roomUsesVideo || !mounted) return;
+    await _ensureHostHeroRenderer();
+    final hero = _hostHeroRenderer;
+    if (hero == null) return;
+    final hostId = _resolveHostUserId(room);
+    MediaStream? stream;
+    if (hostId.isNotEmpty && hostId == _meId) {
+      stream = ref.read(webRtcServiceProvider).localStream;
+    } else if (hostId.isNotEmpty) {
+      stream = _remoteRenderers[hostId]?.srcObject;
+    }
+    final next = stream;
+    final prev = hero.srcObject;
+    if (prev?.id != next?.id) {
+      hero.srcObject = next;
+      if (mounted) setState(() {});
+    }
+  }
+
   void _bindSocket() {
     if (_socketBound) return;
     _socketBound = true;
@@ -560,6 +923,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _socket.on('live:speaking', _onSpeaking);
     _socket.on('live:speaker:mute:update', _onSpeakerMuteUpdate);
     _socket.on('live:reaction', _onReaction);
+    _socket.on('live:notice', _onLiveNotice);
+    _socket.on('live:poll:update', _onLivePollUpdate);
+    _socket.on('live:guest-preview:ended', _onGuestPreviewEnded);
     unawaited(_requestBroadcasts());
   }
 
@@ -579,6 +945,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _socket.off('live:speaking', _onSpeaking);
     _socket.off('live:speaker:mute:update', _onSpeakerMuteUpdate);
     _socket.off('live:reaction', _onReaction);
+    _socket.off('live:notice', _onLiveNotice);
+    _socket.off('live:poll:update', _onLivePollUpdate);
+    _socket.off('live:guest-preview:ended', _onGuestPreviewEnded);
   }
 
   void _onSpeaking(dynamic data) {
@@ -706,7 +1075,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   void _onReaction(dynamic data) {
     if (data is! Map) return;
     final emoji = '${data['emoji'] ?? ''}';
-    if (emoji.isNotEmpty) _reactionController.add(emoji);
+    if (emoji.isNotEmpty) {
+      _reactionController.add(emoji);
+      if (emoji.contains('❤') && _amHosting && mounted) {
+        setState(() => _heartCount++);
+      }
+    }
   }
 
   void _sendReaction(String emoji) {
@@ -752,6 +1126,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
     });
     _cacheBroadcasts(broadcasts);
+    _syncBrowseListRefreshTimer();
+    _queueSharedBroadcastResolution();
     if (activeId.isNotEmpty &&
         !hasActiveInList &&
         _activeRoomMissingFromListCount >= 2) {
@@ -787,6 +1163,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
             .toList();
       });
       _cacheBroadcasts(_broadcasts);
+      _syncBrowseListRefreshTimer();
       if (_activeRoom != null && '${_activeRoom!['id'] ?? ''}' == endedId) {
         unawaited(_forceExitActiveRoom(showEndedCard: !_isHost));
       }
@@ -849,6 +1226,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           _speakerVersionFrom(broadcast),
         );
         _refreshTopologyReady(broadcast);
+        _syncLiveTransientStateFromRoom(broadcast);
         _joinRequests =
             (broadcast['joinRequests'] as List<dynamic>? ?? const [])
                 .whereType<Map>()
@@ -857,6 +1235,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
     });
     _cacheBroadcasts(_broadcasts);
+    _syncBrowseListRefreshTimer();
     _syncRoomChromeState();
     if (_activeRoom != null &&
         '${_activeRoom!['id']}' == '${broadcast['id']}') {
@@ -882,6 +1261,188 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _jumpToLatestImmersiveCommentNextFrame();
   }
 
+  void _onLiveNotice(dynamic data) {
+    if (data is! Map || !mounted) return;
+    final broadcastId = '${data['broadcastId'] ?? ''}';
+    if (_activeRoom == null || '${_activeRoom!['id']}' != broadcastId) return;
+    final notice = Map<String, dynamic>.from(
+      data['notice'] as Map? ?? const <String, dynamic>{},
+    );
+    if (notice.isEmpty) return;
+    final hostUserId = '${notice['hostUserId'] ?? ''}'.trim();
+    if (hostUserId.isNotEmpty && hostUserId == _meId) {
+      _lastShownNoticeId = '${notice['id'] ?? ''}'.trim();
+      return;
+    }
+    unawaited(_showLiveNoticeDialog(notice));
+  }
+
+  void _showSavedJoinNoticeIfNeeded(Map<String, dynamic> room) {
+    if (!mounted || _isHost) return;
+    final notice = room['activeNotice'] is Map
+        ? Map<String, dynamic>.from(room['activeNotice'] as Map)
+        : null;
+    if (notice == null || notice.isEmpty) return;
+    unawaited(_showLiveNoticeDialog(notice));
+  }
+
+  void _onLivePollUpdate(dynamic data) {
+    if (data is! Map || !mounted) return;
+    final broadcastId = '${data['broadcastId'] ?? ''}';
+    if (_activeRoom == null || '${_activeRoom!['id']}' != broadcastId) return;
+    if (data['poll'] == null) {
+      _cancelPollClearTimer();
+      setState(() {
+        _activePoll = null;
+        _myPollVoteOptionId = null;
+      });
+      return;
+    }
+    final poll = Map<String, dynamic>.from(
+      data['poll'] as Map? ?? const <String, dynamic>{},
+    );
+    if (poll.isEmpty) {
+      _cancelPollClearTimer();
+      setState(() {
+        _activePoll = null;
+        _myPollVoteOptionId = null;
+      });
+      return;
+    }
+    setState(() => _activePoll = poll);
+    _syncPollClearTimer(poll);
+  }
+
+  void _cancelPollClearTimer() {
+    _pollClearTimer?.cancel();
+    _pollClearTimer = null;
+  }
+
+  void _syncPollClearTimer(Map<String, dynamic>? poll) {
+    _cancelPollClearTimer();
+    if (poll == null || '${poll['status'] ?? ''}' != 'concluded') return;
+    final pollId = '${poll['id'] ?? ''}';
+    _pollClearTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted || '${_activePoll?['id'] ?? ''}' != pollId) return;
+      setState(() {
+        _activePoll = null;
+        _myPollVoteOptionId = null;
+      });
+    });
+  }
+
+  Future<void> _showLiveNoticeDialog(Map<String, dynamic> notice) async {
+    final noticeId = '${notice['id'] ?? ''}'.trim();
+    final text = '${notice['text'] ?? ''}'.trim();
+    if (text.isEmpty ||
+        noticeId == _lastShownNoticeId ||
+        _liveNoticeDialogOpen ||
+        !mounted) {
+      return;
+    }
+    _lastShownNoticeId = noticeId;
+    await _waitForRouteToSettle();
+    if (!mounted) return;
+    _liveNoticeDialogOpen = true;
+    final colorScheme = Theme.of(context).colorScheme;
+    try {
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.campaign_outlined, color: colorScheme.primary),
+                const SizedBox(width: 10),
+                const Expanded(child: Text('Host notice')),
+              ],
+            ),
+            content: Text(text),
+            actions: [
+              FilledButton(
+                onPressed: () =>
+                    Navigator.of(dialogContext, rootNavigator: true).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      _liveNoticeDialogOpen = false;
+    }
+  }
+
+  void _onGuestPreviewEnded(dynamic data) {
+    if (!_shouldUseGuestLivePreview || !mounted) return;
+    unawaited(_expireGuestLivePreview());
+  }
+
+  Future<void> _expireGuestLivePreview() async {
+    _guestPreviewCountdownTimer?.cancel();
+    _guestPreviewCountdownTimer = null;
+    await _liveAudioService.disconnect();
+    if (!mounted) return;
+    setState(() {
+      _guestPreviewExpired = true;
+      _guestPreviewEndsAt = DateTime.now();
+      _sfuConnected = false;
+      _localMicEnabled = false;
+    });
+  }
+
+  String _guestPreviewReturnPath() {
+    final roomId =
+        '${_activeRoom?['id'] ?? _pendingSharedBroadcastId ?? widget.initialBroadcastId ?? ''}'
+            .trim();
+    if (roomId.isEmpty) return '/app/live';
+    return Uri(
+      path: '/app/live',
+      queryParameters: <String, String>{'broadcastId': roomId},
+    ).toString();
+  }
+
+  void _openGuestPreviewSignup() {
+    final next = Uri.encodeComponent(_guestPreviewReturnPath());
+    context.go('/signup?next=$next');
+  }
+
+  void _openGuestPreviewLogin() {
+    final next = Uri.encodeComponent(_guestPreviewReturnPath());
+    context.go('/login?next=$next');
+  }
+
+  void _minimizeAudioRoom() {
+    if (_activeRoom == null || _roomUsesVideo || _shouldUseGuestLivePreview) {
+      return;
+    }
+    _syncRoomChromeState();
+    ref.read(liveRoomSessionProvider.notifier).setMinimized(true);
+    context.go('/app/content');
+  }
+
+  void _startGuestPreviewCountdown(DateTime endsAt) {
+    _guestPreviewCountdownTimer?.cancel();
+    _guestPreviewCountdownTimer = Timer.periodic(const Duration(seconds: 1), (
+      _,
+    ) {
+      if (!mounted) return;
+      if (DateTime.now().isAfter(endsAt)) {
+        unawaited(_expireGuestLivePreview());
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  Future<void> _waitForRouteToSettle() async {
+    await Future<void>.delayed(const Duration(milliseconds: 260));
+    if (!mounted) return;
+    await WidgetsBinding.instance.endOfFrame;
+  }
+
   void _onBroadcastEnded(dynamic data) {
     if (data is! Map || !mounted) return;
     final broadcastId = '${data['broadcastId'] ?? ''}';
@@ -894,6 +1455,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _loadingList = false;
       if (wasActive) {
         _activeRoom = null;
+        _lastShownNoticeId = null;
         _activeRoomVersion = 0;
         _activeSpeakerVersion = 0;
         _comments = const [];
@@ -902,6 +1464,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _commentController.clear();
         _isFollowingHost = false;
         _followingHostBusy = false;
+        _heartCount = 0;
+        _amHosting = false;
+        _syncLiveTransientStateFromRoom(null);
         _activeSpeakers.clear();
         _latestSpeakingSeqByUser.clear();
       }
@@ -922,15 +1487,18 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (!mounted) return;
     setState(() {
       _activeRoom = null;
+      _lastShownNoticeId = null;
       _activeRoomVersion = 0;
       _activeSpeakerVersion = 0;
       _topologyReady = false;
       _comments = const [];
       _joinRequests = const [];
+      _syncLiveTransientStateFromRoom(null);
       _handRaised = false;
       _commentController.clear();
       _isFollowingHost = false;
       _followingHostBusy = false;
+      _syncLiveTransientStateFromRoom(null);
       _activeSpeakers.clear();
       _activeRoomMissingFromListCount = 0;
       _sfuConnected = false;
@@ -992,19 +1560,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         final joined = await _completeApprovedStageJoin();
         if (!joined || !mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("You're on stage. Mic is off.")),
+          const SnackBar(content: Text("You're now a speaker. Mic is off.")),
         );
       } else {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('You are now on stage')));
+        ).showSnackBar(const SnackBar(content: Text('You are now a speaker.')));
         await _syncRtcParticipants();
         _syncStageMuteState();
       }
     } else {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Stage request declined')));
+      ).showSnackBar(const SnackBar(content: Text('Speaker request declined')));
     }
   }
 
@@ -1024,8 +1592,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         SnackBar(
           content: Text(
             payload is Map
-                ? '${payload['message'] ?? 'Unable to join stage right now'}'
-                : 'Stage join timed out. Please try again.',
+                ? '${payload['message'] ?? 'Unable to join speakers right now'}'
+                : 'Speaker join timed out. Please try again.',
           ),
         ),
       );
@@ -1211,9 +1779,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     bool isPrivate = false,
   }) async {
     final me = ref.read(sessionControllerProvider).user;
-    if (me == null ||
-        title.trim().isEmpty ||
-        _creating) {
+    if (me == null || title.trim().isEmpty || _creating) {
       return false;
     }
     final sessionId = ref.read(sessionControllerProvider).sessionId ?? '';
@@ -1293,6 +1859,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _browseType = '${broadcast['type'] ?? 'audio'}';
         ref.read(liveBrowseTypeProvider.notifier).state = _browseType;
         _language = language;
+        _syncLiveTransientStateFromRoom(broadcast);
         _comments = (broadcast['comments'] as List<dynamic>? ?? const [])
             .whereType<Map>()
             .map((item) => Map<String, dynamic>.from(item))
@@ -1306,6 +1873,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       if ('${broadcast['type'] ?? 'audio'}' == 'audio') {
         unawaited(Helper.setSpeakerphoneOn(true));
       }
+      _showSavedJoinNoticeIfNeeded(broadcast);
       if (_usesSfuAudioPath) {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
         await _refreshLiveAudioPublishState();
@@ -1372,6 +1940,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _refreshTopologyReady(broadcast);
         _browseType = '${broadcast['type'] ?? _browseType}';
         ref.read(liveBrowseTypeProvider.notifier).state = _browseType;
+        _syncLiveTransientStateFromRoom(broadcast);
         _comments = const [];
         _joinRequests =
             (broadcast['joinRequests'] as List<dynamic>? ?? const [])
@@ -1385,6 +1954,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       });
       _jumpToLatestImmersiveCommentNextFrame();
       _syncRoomChromeState();
+      _syncBrowseListRefreshTimer();
       unawaited(_refreshHostFollowState(broadcast));
       if ('${broadcast['type'] ?? 'audio'}' == 'audio') {
         unawaited(Helper.setSpeakerphoneOn(true));
@@ -1393,6 +1963,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
         await _refreshLiveAudioPublishState();
       } else {
+        // Mesh: merge list snapshot so host/speaker ids exist before first RTC sync.
+        if (_enrichActiveRoomFromBroadcasts()) {
+          _refreshTopologyReady(_activeRoom);
+        }
         await _syncRtcParticipants();
         unawaited(_refreshRoomTopologyAfterJoin());
       }
@@ -1403,6 +1977,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         '${payload['message'] ?? 'Realtime session mismatch detected.'}',
       );
       _recordRtcTransition('join_broadcast identity_mismatch');
+      return;
+    }
+    if (payload is Map && payload['code'] == 'room_full') {
+      await _showRoomFullDialog(
+        '${payload['message'] ?? 'Room full. Try the next broadcast.'}',
+      );
+      _recordRtcTransition('join_broadcast room_full');
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1417,10 +1998,163 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _recordRtcTransition('join_broadcast failed');
   }
 
+  Future<void> _showRoomFullDialog(String message) async {
+    if (!mounted) return;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) {
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  scheme.surface,
+                  scheme.surfaceContainerHighest.withValues(alpha: 0.94),
+                ],
+              ),
+              border: Border.all(color: scheme.primary.withValues(alpha: 0.18)),
+              boxShadow: [
+                BoxShadow(
+                  color: scheme.primary.withValues(alpha: 0.18),
+                  blurRadius: 28,
+                  offset: const Offset(0, 14),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: scheme.primary.withValues(alpha: 0.12),
+                  ),
+                  child: Icon(
+                    Icons.groups_2_rounded,
+                    color: scheme.primary,
+                    size: 30,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Room is full',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                FilledButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(46),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _joinGuestLivePreview(Map<String, dynamic> room) async {
+    if (_guestPreviewJoinInFlight || _guestPreviewExpired) return;
+    final roomId = '${room['id'] ?? ''}'.trim();
+    if (roomId.isEmpty || !_socket.isConnected) return;
+    _guestPreviewJoinInFlight = true;
+    _recordRtcTransition('guest_preview_join start room=$roomId');
+    final payload = await _socket.emitWithAckRetry(
+      'live:broadcast:guest-preview:join',
+      <String, dynamic>{'broadcastId': roomId},
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    _guestPreviewJoinInFlight = false;
+    if (!mounted) return;
+    if (payload is Map && payload['ok'] == true) {
+      final broadcast = _normalizeBroadcast(
+        Map<String, dynamic>.from(payload['broadcast'] as Map? ?? room),
+      );
+      final mediaSession = payload['mediaSession'] is Map
+          ? Map<String, dynamic>.from(payload['mediaSession'] as Map)
+          : null;
+      final preview = payload['guestPreview'] is Map
+          ? Map<String, dynamic>.from(payload['guestPreview'] as Map)
+          : const <String, dynamic>{};
+      final expiresAtMs = (preview['expiresAt'] as num?)?.toInt() ?? 0;
+      final endsAt = expiresAtMs > 0
+          ? DateTime.fromMillisecondsSinceEpoch(expiresAtMs)
+          : DateTime.now().add(const Duration(seconds: 45));
+      setState(() {
+        _activeRoom = broadcast;
+        _activeRoomVersion = _roomVersionFrom(broadcast);
+        _activeSpeakerVersion = _speakerVersionFrom(broadcast);
+        _refreshTopologyReady(broadcast);
+        _browseType = '${broadcast['type'] ?? _browseType}';
+        _syncLiveTransientStateFromRoom(broadcast);
+        _comments = const [];
+        _joinRequests = const [];
+        _handRaised = false;
+        _commentController.clear();
+        _isFollowingHost = false;
+        _activeSpeakers.clear();
+        _guestPreviewExpired = false;
+        _guestPreviewEndsAt = endsAt;
+        _localMicEnabled = false;
+      });
+      _startGuestPreviewCountdown(endsAt);
+      if (_usesSfuAudioPath) {
+        await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
+      }
+      return;
+    }
+    setState(() {
+      _guestPreviewExpired = true;
+      _guestPreviewEndsAt = DateTime.now();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          payload is Map
+              ? '${payload['message'] ?? 'Create an account to join this room.'}'
+              : 'Create an account to join this room.',
+        ),
+      ),
+    );
+  }
+
   Future<void> _refreshRoomTopologyAfterJoin() async {
     // Some backends return a minimal join payload first, then fill speaker/host
     // topology shortly after. Refresh once to avoid silent listener joins.
-    await Future<void>.delayed(const Duration(milliseconds: 900));
+    await Future<void>.delayed(const Duration(milliseconds: 320));
     if (!mounted || _activeRoom == null) return;
     await _refreshActiveRoomViaJoin();
     if (_enrichActiveRoomFromBroadcasts()) {
@@ -1436,7 +2170,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _recordRtcTransition('leave_broadcast start room=${room['id'] ?? ''}');
     final wasHost = _isHost;
     final commentCount = _comments.length;
-    final peakListeners = room['audienceCount'] as int? ?? 0;
+    final peakListeners = _activeAudienceCount;
     final createdAt = room['createdAt'];
     final payload = await _socket.emitWithAckRetry(
       'live:broadcast:leave',
@@ -1449,6 +2183,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (!mounted) return;
     setState(() {
       _activeRoom = null;
+      _lastShownNoticeId = null;
       _activeRoomVersion = 0;
       _activeSpeakerVersion = 0;
       _topologyReady = false;
@@ -1464,6 +2199,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _latestSpeakingSeqByUser.clear();
     });
     _syncRoomChromeState();
+    _syncBrowseListRefreshTimer();
     unawaited(Helper.setSpeakerphoneOn(false));
     unawaited(_requestBroadcasts());
     if (payload is Map && payload['ended'] == true) {
@@ -1542,14 +2278,14 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 const SizedBox(height: 10),
                 _ReportStatRow(
                   icon: Icons.headset_outlined,
-                  label: 'Peak listeners',
-                  value: '$serverPeak',
+                  label: 'Peak audience',
+                  value: compactCount(serverPeak),
                 ),
                 const SizedBox(height: 10),
                 _ReportStatRow(
                   icon: Icons.chat_bubble_outline,
                   label: 'Comments',
-                  value: '$commentCount',
+                  value: compactCount(commentCount),
                 ),
                 const SizedBox(height: 22),
                 FilledButton(
@@ -1572,7 +2308,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     unawaited(_requestBroadcasts());
   }
 
-  Future<void> _requestBroadcasts() async {
+  Future<void> _requestBroadcasts({bool showLoadingOnFailure = true}) async {
     final token = ++_broadcastRequestToken;
     final payload = await _socket.emitWithAckRetry(
       'live:broadcasts:get',
@@ -1583,7 +2319,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (token != _broadcastRequestToken) return;
     if (payload is Map && payload['broadcasts'] is List) {
       _onBroadcastList(payload);
-    } else if (mounted) {
+    } else if (mounted && showLoadingOnFailure) {
       setState(() => _loadingList = false);
     }
     Future<void>.delayed(const Duration(seconds: 4), () {
@@ -1608,6 +2344,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         'author': me.displayName,
         'userId': me.id,
         'photo': me.profilePhotoUrl,
+        if (me.isProLike) 'commentTheme': _myCommentTheme,
       },
       ack: (dynamic payload) {
         if (payload is Map && payload['ok'] != true && mounted) {
@@ -1617,6 +2354,202 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         }
       },
     );
+  }
+
+  Future<void> _sendHostNotice(String text) async {
+    final room = _activeRoom;
+    final clean = text.trim();
+    if (room == null || clean.isEmpty || !_isHost) return;
+    final payload = await _socket.emitWithAckRetry(
+      'live:notice:send',
+      <String, dynamic>{'broadcastId': room['id'], 'text': clean},
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to send notice'}'
+                : 'Notice request timed out.',
+          ),
+        ),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Notice sent.')));
+  }
+
+  Future<bool> _saveHostJoinNotice(String text) async {
+    final room = _activeRoom;
+    final clean = text.trim();
+    if (room == null || clean.isEmpty || !_isHost) return false;
+    final payload = await _socket.emitWithAckRetry(
+      'live:notice:save',
+      <String, dynamic>{'broadcastId': room['id'], 'text': clean},
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return false;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to save join notice'}'
+                : 'Join notice request timed out.',
+          ),
+        ),
+      );
+      return false;
+    }
+    if (payload['broadcast'] is Map) {
+      _applyActiveRoomUpdateFromPayload(
+        Map<String, dynamic>.from(payload['broadcast'] as Map),
+      );
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Join notice saved.')));
+    return true;
+  }
+
+  Future<bool> _deleteHostJoinNotice() async {
+    final room = _activeRoom;
+    if (room == null || !_isHost) return false;
+    final payload = await _socket.emitWithAckRetry(
+      'live:notice:delete',
+      <String, dynamic>{'broadcastId': room['id']},
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return false;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to delete join notice'}'
+                : 'Join notice delete timed out.',
+          ),
+        ),
+      );
+      return false;
+    }
+    if (payload['broadcast'] is Map) {
+      _applyActiveRoomUpdateFromPayload(
+        Map<String, dynamic>.from(payload['broadcast'] as Map),
+      );
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Join notice deleted.')));
+    return true;
+  }
+
+  Future<void> _createHostPoll({
+    required String question,
+    required List<String> options,
+  }) async {
+    final room = _activeRoom;
+    final cleanQuestion = question.trim();
+    final cleanOptions = options
+        .map((option) => option.trim())
+        .where((option) => option.isNotEmpty)
+        .toList(growable: false);
+    if (room == null ||
+        !_isHost ||
+        cleanQuestion.isEmpty ||
+        cleanOptions.length < 2) {
+      return;
+    }
+    final payload = await _socket.emitWithAckRetry(
+      'live:poll:create',
+      <String, dynamic>{
+        'broadcastId': room['id'],
+        'question': cleanQuestion,
+        'options': cleanOptions,
+      },
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to create poll'}'
+                : 'Poll request timed out.',
+          ),
+        ),
+      );
+      return;
+    }
+    if (payload['poll'] is Map) {
+      setState(() {
+        _activePoll = Map<String, dynamic>.from(payload['poll'] as Map);
+        _myPollVoteOptionId = null;
+      });
+      _syncPollClearTimer(_activePoll);
+    }
+  }
+
+  Future<void> _voteInLivePoll(String optionId) async {
+    final room = _activeRoom;
+    final poll = _currentLivePoll;
+    if (room == null ||
+        poll == null ||
+        _pollHasConcluded(poll) ||
+        optionId.trim().isEmpty) {
+      return;
+    }
+    final payload = await _socket.emitWithAckRetry(
+      'live:poll:vote',
+      <String, dynamic>{
+        'broadcastId': room['id'],
+        'pollId': poll['id'],
+        'optionId': optionId,
+      },
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to submit vote'}'
+                : 'Vote request timed out.',
+          ),
+        ),
+      );
+      return;
+    }
+    setState(() {
+      _myPollVoteOptionId = '${payload['selectedOptionId'] ?? optionId}';
+      if (payload['poll'] is Map) {
+        _activePoll = Map<String, dynamic>.from(payload['poll'] as Map);
+      }
+    });
+    _syncPollClearTimer(_activePoll);
+  }
+
+  bool _pollHasConcluded(Map<String, dynamic> poll) {
+    final status = '${poll['status'] ?? 'active'}'.trim().toLowerCase();
+    if (status == 'concluded') return true;
+    final endsAt = (poll['endsAt'] as num?)?.toInt() ?? 0;
+    return endsAt > 0 && DateTime.now().millisecondsSinceEpoch >= endsAt;
   }
 
   Future<void> _copyLiveComment(String text) async {
@@ -1629,10 +2562,174 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     ).showSnackBar(const SnackBar(content: Text('Comment copied')));
   }
 
-  void _showPlaceholderAction(String label) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$label is coming next')));
+  Future<void> _translateLiveComment(String text) async {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
+    final targetLanguage =
+        ref.read(sessionControllerProvider).user?.firstLanguage ?? _language;
+    try {
+      final data = await ref
+          .read(apiClientProvider)
+          .postJson(
+            '/translations/text',
+            body: <String, dynamic>{
+              'text': cleaned,
+              'targetLanguage': targetLanguage,
+              'sourceLanguage': 'auto',
+              'context': 'live_comment',
+            },
+          );
+      if (!mounted) return;
+      await _showLiveTranslationSheet(
+        original: cleaned,
+        translated: data['translation']?.toString().trim() ?? '',
+        targetLanguage: targetLanguage,
+        note: data['note']?.toString().trim() ?? '',
+      );
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(userFriendlyMessage(error))));
+    }
+  }
+
+  Future<void> _showLiveTranslationSheet({
+    required String original,
+    required String translated,
+    required String targetLanguage,
+    required String note,
+  }) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        final theme = Theme.of(context);
+        final result = translated.trim();
+        final info = note.trim().isNotEmpty
+            ? note.trim()
+            : 'Translated to ${targetLanguage.trim().isEmpty ? 'your language' : targetLanguage.trim()}.';
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(24),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Translation',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Original',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(original),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Result',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      result.isEmpty
+                          ? 'No translation result returned.'
+                          : result,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      info,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openLiveCommentActions({
+    required String author,
+    required String text,
+  }) async {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        final theme = Theme.of(context);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(24),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    title: Text(
+                      author.isEmpty ? 'Comment' : author,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    subtitle: Text(
+                      cleaned,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.content_copy_rounded),
+                    title: const Text('Copy'),
+                    onTap: () async {
+                      Navigator.of(context).pop();
+                      await _copyLiveComment(cleaned);
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.translate_rounded),
+                    title: const Text('Translate'),
+                    onTap: () async {
+                      Navigator.of(context).pop();
+                      await _translateLiveComment(cleaned);
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _raiseHand() async {
@@ -1641,11 +2738,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (me == null || room == null || _handRaised || !_socket.isConnected) {
       return;
     }
+    if (_roomUsesVideo && _videoLiveParticipants.length >= 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('This video broadcast already has 4 live users.'),
+        ),
+      );
+      return;
+    }
     if (me.isProLike != true) {
       await showProAccessSheet(
         context: context,
         ref: ref,
-        featureName: 'Stage Access',
+        featureName: 'Speaker Access',
         onUnlocked: () {
           if (mounted) unawaited(_raiseHand());
         },
@@ -1671,8 +2776,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       SnackBar(
         content: Text(
           payload is Map
-              ? '${payload['message'] ?? 'Unable to request stage right now'}'
-              : 'Stage request timed out. Try again.',
+              ? '${payload['message'] ?? 'Unable to request speaker access right now'}'
+              : 'Speaker request timed out. Try again.',
         ),
       ),
     );
@@ -1703,6 +2808,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           .whereType<Map>()
           .map((item) => Map<String, dynamic>.from(item))
           .toList(growable: true),
+      'activeNotice': room['activeNotice'] is Map
+          ? Map<String, dynamic>.from(room['activeNotice'] as Map)
+          : null,
+      'activePoll': room['activePoll'] is Map
+          ? Map<String, dynamic>.from(room['activePoll'] as Map)
+          : null,
     };
   }
 
@@ -1739,6 +2850,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _activeRoomVersion = _roomVersionFrom(broadcast);
       _activeSpeakerVersion = _speakerVersionFrom(broadcast);
       _refreshTopologyReady(broadcast);
+      _syncLiveTransientStateFromRoom(broadcast);
       _joinRequests = (broadcast['joinRequests'] as List<dynamic>? ?? const [])
           .whereType<Map>()
           .map((item) => Map<String, dynamic>.from(item))
@@ -1754,6 +2866,16 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (room == null || !_socket.isConnected) return false;
     final userId = _requestUserId(request);
     if (userId.isEmpty) return false;
+    if (_roomUsesVideo && _videoLiveParticipants.length >= 4) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This video broadcast already has 4 live users.'),
+          ),
+        );
+      }
+      return false;
+    }
 
     final payload = await _socket.emitWithAckRetry(
       'live:request:decision',
@@ -1787,6 +2909,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _activeRoomVersion = _roomVersionFrom(broadcast);
         _activeSpeakerVersion = _speakerVersionFrom(broadcast);
         _refreshTopologyReady(broadcast);
+        _syncLiveTransientStateFromRoom(broadcast);
         _joinRequests =
             (broadcast['joinRequests'] as List<dynamic>? ?? const [])
                 .whereType<Map>()
@@ -1909,18 +3032,62 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
       normalizedSpeakers.add(Map<String, dynamic>.from(speaker));
     }
-    while (normalizedSpeakers.length < 3) {
+    while (normalizedSpeakers.length < 11) {
       normalizedSpeakers.add(null);
     }
 
     return <Map<String, dynamic>?>[
       normalizedHost,
-      ...normalizedSpeakers.take(3),
+      ...normalizedSpeakers.take(11),
     ];
   }
 
   List<Map<String, dynamic>> get _speakers =>
       _stageSlots.whereType<Map<String, dynamic>>().toList();
+
+  List<Map<String, dynamic>> get _videoLiveParticipants {
+    final room = _activeRoom;
+    if (room == null) return const <Map<String, dynamic>>[];
+    final hostUserId = _resolveHostUserId(room);
+    final byUserId = <String, Map<String, dynamic>>{};
+
+    void addParticipant(Map<String, dynamic> participant) {
+      final userId = '${participant['userId'] ?? participant['id'] ?? ''}'
+          .trim();
+      if (userId.isEmpty || byUserId.containsKey(userId)) return;
+      byUserId[userId] = Map<String, dynamic>.from(participant);
+    }
+
+    if (hostUserId.isNotEmpty) {
+      final hostFromSpeakers = (room['speakers'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .where(
+            (item) => '${item['userId'] ?? item['id'] ?? ''}' == hostUserId,
+          )
+          .cast<Map<String, dynamic>?>()
+          .firstWhere((_) => true, orElse: () => null);
+      addParticipant(<String, dynamic>{
+        ...?hostFromSpeakers,
+        'id': hostFromSpeakers?['id'] ?? 'host-$hostUserId',
+        'userId': hostUserId,
+        'name': '${room['host'] ?? hostFromSpeakers?['name'] ?? 'Host'}',
+        'photo': '${room['hostPhoto'] ?? hostFromSpeakers?['photo'] ?? ''}',
+        'role': 'Host',
+        'occupied': true,
+      });
+    }
+
+    for (final speaker
+        in (room['speakers'] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))) {
+      if (speaker['occupied'] == false) continue;
+      addParticipant(speaker);
+    }
+
+    return byUserId.values.take(4).toList(growable: false);
+  }
 
   bool get _amOnStage =>
       _isHost ||
@@ -1934,6 +3101,97 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     final count = _pendingJoinRequestCount;
     if (count > 99) return '99+';
     return '$count';
+  }
+
+  bool get _roomIsPrivate => _activeRoom?['isPrivate'] == true;
+
+  String get _backgroundThemeName {
+    final theme = '${_activeRoom?['backgroundTheme'] ?? 'gold'}'
+        .trim()
+        .toLowerCase();
+    return _liveBackgroundThemes.contains(theme) ? theme : 'gold';
+  }
+
+  String get _micEffectName =>
+      _liveMicEffects.contains(_myMicEffect) ? _myMicEffect : 'pulse';
+
+  Map<String, dynamic>? get _currentLivePoll {
+    if (_activePoll != null) return _activePoll;
+    final roomPoll = _activeRoom?['activePoll'];
+    return roomPoll is Map ? Map<String, dynamic>.from(roomPoll) : null;
+  }
+
+  void _syncLiveTransientStateFromRoom(Map<String, dynamic>? room) {
+    if (room == null) {
+      _cancelPollClearTimer();
+      _activePoll = null;
+      _myPollVoteOptionId = null;
+      _lastShownNoticeId = null;
+      return;
+    }
+    final poll = room['activePoll'];
+    final previousPollId = '${_activePoll?['id'] ?? ''}';
+    _activePoll = poll is Map ? Map<String, dynamic>.from(poll) : null;
+    _syncPollClearTimer(_activePoll);
+    final nextPollId = '${_activePoll?['id'] ?? ''}';
+    if (nextPollId.isEmpty || nextPollId != previousPollId) {
+      _myPollVoteOptionId = null;
+    }
+  }
+
+  List<Map<String, dynamic>> get _moderators {
+    return (_activeRoom?['moderators'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList(growable: false);
+  }
+
+  Set<String> get _moderatorIds => _moderators
+      .map((item) => '${item['userId'] ?? ''}')
+      .where((id) => id.isNotEmpty)
+      .toSet();
+
+  List<Map<String, dynamic>> get _roomParticipantsForModeration {
+    final room = _activeRoom;
+    if (room == null) return const <Map<String, dynamic>>[];
+    final hostUserId = _resolveHostUserId(room);
+    final seen = <String>{};
+    final participants = <Map<String, dynamic>>[];
+
+    void addAll(List<dynamic> items, {required String fallbackRole}) {
+      for (final raw in items.whereType<Map>()) {
+        final item = Map<String, dynamic>.from(raw);
+        final userId = '${item['userId'] ?? ''}'.trim();
+        if (userId.isEmpty || userId == hostUserId || !seen.add(userId)) {
+          continue;
+        }
+        item['roomRole'] = fallbackRole;
+        participants.add(item);
+      }
+    }
+
+    addAll(
+      room['speakers'] as List<dynamic>? ?? const [],
+      fallbackRole: 'speaker',
+    );
+    addAll(
+      room['audienceMembers'] as List<dynamic>? ?? const [],
+      fallbackRole: 'listener',
+    );
+    addAll(
+      room['joinRequests'] as List<dynamic>? ?? const [],
+      fallbackRole: 'requesting',
+    );
+    addAll(
+      room['moderators'] as List<dynamic>? ?? const [],
+      fallbackRole: 'moderator',
+    );
+    participants.sort((a, b) {
+      final aName = '${a['name'] ?? ''}'.trim().toLowerCase();
+      final bName = '${b['name'] ?? ''}'.trim().toLowerCase();
+      return aName.compareTo(bName);
+    });
+    return participants;
   }
 
   double? _asDouble(dynamic value) {
@@ -1984,7 +3242,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           normalized.clamp(0.0, 1.0).toDouble(),
         );
       }
-      return voiceActivity || maxAudioLevel > 0.025;
+      return voiceActivity || maxAudioLevel > 0.012;
     } catch (_) {
       return false;
     }
@@ -2050,8 +3308,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _speakingPositiveSamples = 0;
     }
     final stabilizedSpeaking = _lastLocalSpeaking
-        ? _speakingNegativeSamples < 2
-        : _speakingPositiveSamples >= 2;
+        ? _speakingNegativeSamples < 3
+        : _speakingPositiveSamples >= 1;
     _setLocalSpeaking(stabilizedSpeaking);
   }
 
@@ -2121,6 +3379,22 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           .whereType<Map>()
           .map((item) => Map<String, dynamic>.from(item))
           .toList();
+
+  int get _activeAudienceCount {
+    final room = _activeRoom;
+    final realAudienceCount = _audienceMembers.length;
+    if (room == null) return realAudienceCount;
+    final serverAudienceCount = (room['audienceCount'] as num?)?.toInt() ?? 0;
+    final attendeeCount = (room['attendees'] as num?)?.toInt() ?? 0;
+    final speakerCount = (room['speakers'] as List<dynamic>? ?? const [])
+        .where((speaker) => speaker != null)
+        .length;
+    final audienceFromAttendees = math.max(0, attendeeCount - speakerCount);
+    return math.max(
+      realAudienceCount,
+      math.max(serverAudienceCount, audienceFromAttendees),
+    );
+  }
 
   void _optimisticallyPromoteSelfToStage() {
     final room = _activeRoom;
@@ -2207,6 +3481,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _localVideoEnabled = stream.getVideoTracks().any((track) => track.enabled);
     _syncStageMuteState();
     if (mounted) setState(() {});
+    if (_roomUsesVideo) {
+      unawaited(_syncHostHeroVideo());
+    }
   }
 
   Future<void> _disposeLocalStageStream() async {
@@ -2219,20 +3496,16 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     await ref.read(webRtcServiceProvider).disposeLocalStream();
   }
 
-  Future<RTCRtpSender?> _findAudioSender(RTCPeerConnection connection) async {
-    final senders = await connection.getSenders();
-    for (final sender in senders) {
-      if (sender.track?.kind == 'audio') return sender;
-    }
-    return null;
-  }
-
-  Future<void> _ensureAudioPeerMode(
+  /// Mesh WebRTC for **video** broadcasts only: explicit audio + video transceivers
+  /// so listeners receive remote video and stage can publish without relying on
+  /// implicit negotiation alone.
+  Future<void> _ensureVideoBroadcastMeshPeerMedia(
     RTCPeerConnection connection, {
     required bool shouldSendAudio,
   }) async {
-    if (_roomUsesVideo) return;
+    final shouldSendVideo = _amOnStage && _localVideoEnabled;
     final transceivers = await connection.getTransceivers();
+
     RTCRtpTransceiver? audioTransceiver;
     for (final transceiver in transceivers) {
       if (transceiver.sender.track?.kind == 'audio' ||
@@ -2241,9 +3514,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         break;
       }
     }
-
     if (audioTransceiver == null) {
-      await connection.addTransceiver(
+      audioTransceiver = await connection.addTransceiver(
         kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
         init: RTCRtpTransceiverInit(
           direction: shouldSendAudio
@@ -2259,7 +3531,103 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       );
     }
 
-    final audioSender = await _findAudioSender(connection);
+    final audioSender = audioTransceiver.sender;
+    if (shouldSendAudio) {
+      final stream =
+          ref.read(webRtcServiceProvider).localStream ??
+          await ref
+              .read(webRtcServiceProvider)
+              .createLocalStream(audio: true, video: true);
+      final tracks = stream.getAudioTracks();
+      if (tracks.isEmpty) return;
+      final track = tracks.first;
+      if (audioSender.track?.id != track.id) {
+        await audioSender.replaceTrack(track);
+      }
+    } else if (audioSender.track != null) {
+      await audioSender.replaceTrack(null);
+    }
+
+    final transceiversAfterAudio = await connection.getTransceivers();
+    RTCRtpTransceiver? videoTransceiver;
+    for (final transceiver in transceiversAfterAudio) {
+      if (transceiver.sender.track?.kind == 'video' ||
+          transceiver.receiver.track?.kind == 'video') {
+        videoTransceiver = transceiver;
+        break;
+      }
+    }
+    if (videoTransceiver == null) {
+      videoTransceiver = await connection.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(
+          direction: shouldSendVideo
+              ? TransceiverDirection.SendRecv
+              : TransceiverDirection.RecvOnly,
+        ),
+      );
+    } else {
+      await videoTransceiver.setDirection(
+        shouldSendVideo
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly,
+      );
+    }
+
+    final videoSender = videoTransceiver.sender;
+    if (shouldSendVideo) {
+      final stream = ref.read(webRtcServiceProvider).localStream;
+      final videoTracks =
+          stream?.getVideoTracks() ?? const <MediaStreamTrack>[];
+      if (videoTracks.isEmpty) return;
+      final vtrack = videoTracks.first;
+      if (videoSender.track?.id != vtrack.id) {
+        await videoSender.replaceTrack(vtrack);
+      }
+    } else if (videoSender.track != null) {
+      await videoSender.replaceTrack(null);
+    }
+  }
+
+  Future<void> _ensureAudioPeerMode(
+    RTCPeerConnection connection, {
+    required bool shouldSendAudio,
+  }) async {
+    if (_roomUsesVideo) {
+      await _ensureVideoBroadcastMeshPeerMedia(
+        connection,
+        shouldSendAudio: shouldSendAudio,
+      );
+      return;
+    }
+    final transceivers = await connection.getTransceivers();
+    RTCRtpTransceiver? audioTransceiver;
+    for (final transceiver in transceivers) {
+      if (transceiver.sender.track?.kind == 'audio' ||
+          transceiver.receiver.track?.kind == 'audio') {
+        audioTransceiver = transceiver;
+        break;
+      }
+    }
+
+    if (audioTransceiver == null) {
+      audioTransceiver = await connection.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(
+          direction: shouldSendAudio
+              ? TransceiverDirection.SendRecv
+              : TransceiverDirection.RecvOnly,
+        ),
+      );
+    } else {
+      await audioTransceiver.setDirection(
+        shouldSendAudio
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly,
+      );
+    }
+
+    final audioSender = audioTransceiver.sender;
     if (shouldSendAudio) {
       final stream =
           ref.read(webRtcServiceProvider).localStream ??
@@ -2269,14 +3637,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       final tracks = stream.getAudioTracks();
       if (tracks.isEmpty) return;
       final track = tracks.first;
-      if (audioSender != null) {
-        if (audioSender.track?.id != track.id) {
-          await audioSender.replaceTrack(track);
-        }
-      } else {
-        await connection.addTrack(track, stream);
+      if (audioSender.track?.id != track.id) {
+        await audioSender.replaceTrack(track);
       }
-    } else if (audioSender != null && audioSender.track != null) {
+    } else if (audioSender.track != null) {
       await audioSender.replaceTrack(null);
     }
   }
@@ -2325,6 +3689,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _markInboundAudioDetected();
       }
       if (mounted) setState(() {});
+      if (_roomUsesVideo) {
+        unawaited(_syncHostHeroVideo());
+      }
     };
 
     connection.onConnectionState = (state) {
@@ -2338,12 +3705,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     };
 
     _peerConnections[peerUserId] = connection;
-    final stream = ref.read(webRtcServiceProvider).localStream;
-    if (stream != null) {
-      for (final track in stream.getTracks()) {
-        await connection.addTrack(track, stream);
-      }
-    }
     return connection;
   }
 
@@ -2351,6 +3712,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     final room = _activeRoom;
     if (room == null) return;
     final connection = await _ensurePeerConnection(peerUserId);
+    await _ensureAudioPeerMode(connection, shouldSendAudio: _amOnStage);
     final offer = await connection.createOffer(<String, dynamic>{
       'offerToReceiveAudio': true,
       'offerToReceiveVideo': _roomUsesVideo,
@@ -2397,6 +3759,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     }
   }
 
+  /// Mesh listeners need `hostUserId` / speakers in `_activeRoom` before
+  /// `_rtcTargetPeerIds` is non-empty. Merge from the cached list or re-join
+  /// once before giving up on this sync.
+  Future<void> _hydrateMeshTopologyForOffStageListener() async {
+    if (_usesSfuAudioPath || _activeRoom == null || _amOnStage) return;
+    if (_rtcTargetPeerIds.isNotEmpty) return;
+    if (_enrichActiveRoomFromBroadcasts()) {
+      _refreshTopologyReady(_activeRoom);
+    }
+    if (_rtcTargetPeerIds.isNotEmpty) return;
+    await _refreshActiveRoomViaJoin();
+  }
+
   Future<void> _doSyncRtcParticipants() async {
     final room = _activeRoom;
     if (room == null || !mounted) return;
@@ -2416,10 +3791,20 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       await _disposeLocalStageStream();
     }
 
+    if (!onStageNow && !_usesSfuAudioPath) {
+      await _hydrateMeshTopologyForOffStageListener();
+    }
+
     final peerIds = _rtcTargetPeerIds;
     _recordRtcTransition('rtc_targets count=${peerIds.length}');
     if (!onStageNow && !_topologyReady && peerIds.isEmpty) {
       _recordRtcTransition('rtc_sync blocked topology_not_ready');
+      _syncSpeakingProbeLifecycle();
+      _wasOnStage = onStageNow;
+      if (mounted) setState(() {});
+      if (_roomUsesVideo) {
+        unawaited(_syncHostHeroVideo());
+      }
       return;
     }
     final existingIds = _peerConnections.keys.toList();
@@ -2449,6 +3834,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     }
     _wasOnStage = onStageNow;
     if (mounted) setState(() {});
+    if (_roomUsesVideo) {
+      unawaited(_syncHostHeroVideo());
+    }
   }
 
   Future<void> _bootstrapMicOnStageJoin() async {
@@ -2489,6 +3877,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Future<void> _disposeRtc() async {
+    await _disposeHostHeroRenderer();
     final peerIds = _peerConnections.keys.toList();
     for (final peerUserId in peerIds) {
       await _removePeer(peerUserId);
@@ -2588,7 +3977,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Microphone access is required to speak on stage.'),
+              content: Text('Microphone access is required to speak.'),
             ),
           );
           return;
@@ -2640,12 +4029,18 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _localVideoEnabled = track.enabled;
     }
     if (mounted) setState(() {});
+    if (_roomUsesVideo) {
+      unawaited(_syncHostHeroVideo());
+    }
   }
 
   Future<void> _switchStageCamera() async {
     final switched = await ref.read(webRtcServiceProvider).switchCamera();
     if (switched && mounted) {
       setState(() {});
+      if (_roomUsesVideo) {
+        unawaited(_syncHostHeroVideo());
+      }
     }
   }
 
@@ -2718,8 +4113,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         SnackBar(
           content: Text(
             payload is Map
-                ? '${payload['message'] ?? 'Unable to leave stage right now'}'
-                : 'Leave stage timed out. Try again.',
+                ? '${payload['message'] ?? 'Unable to leave speakers right now'}'
+                : 'Leave speaker timed out. Try again.',
           ),
         ),
       );
@@ -2833,6 +4228,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _unbindSocket();
       _bindSocket();
       unawaited(_requestBroadcasts());
+      _queueSharedBroadcastResolution();
       if (_activeRoom != null && !_rejoiningRoom) {
         _rejoiningRoom = true;
         final room = _activeRoom!;
@@ -2862,6 +4258,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
               _activeRoomVersion = _roomVersionFrom(broadcast);
               _activeSpeakerVersion = _speakerVersionFrom(broadcast);
               _refreshTopologyReady(broadcast);
+              _syncLiveTransientStateFromRoom(broadcast);
               _handRaised = false;
             });
             _syncRoomChromeState();
@@ -2876,11 +4273,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           } else {
             setState(() {
               _activeRoom = null;
+              _lastShownNoticeId = null;
               _activeRoomVersion = 0;
               _activeSpeakerVersion = 0;
               _topologyReady = false;
               _comments = const [];
               _joinRequests = const [];
+              _syncLiveTransientStateFromRoom(null);
               _handRaised = false;
               _commentController.clear();
               _isFollowingHost = false;
@@ -2897,6 +4296,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       } else {
         setState(() {});
       }
+      _syncBrowseListRefreshTimer();
       return;
     }
 
@@ -2913,86 +4313,98 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _activeSpeakers.clear();
         _sfuConnected = false;
       });
+      _syncBrowseListRefreshTimer();
       return;
     }
 
     setState(() {});
   }
 
-  Future<void> _copyRoomId() async {
+  Future<void> _shareRoom() async {
     final room = _activeRoom;
     if (room == null) return;
-    await Clipboard.setData(ClipboardData(text: '${room['id'] ?? ''}'));
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Broadcast ID copied')));
+    final roomId = '${room['id'] ?? ''}'.trim();
+    var shareUrl = AppConfig.liveBroadcastShareUrl(roomId);
+    try {
+      final share = await ref
+          .read(contentRepositoryProvider)
+          .createLiveShareLink(
+            broadcastId: roomId,
+            room: <String, dynamic>{
+              'title': '${room['title'] ?? ''}',
+              'description': '${room['description'] ?? ''}',
+              'roomType': '${room['type'] ?? ''}',
+              'hostName': '${room['host'] ?? ''}',
+              'hostProfilePhotoUrl': '${room['hostPhoto'] ?? ''}',
+              'isPrivate': room['isPrivate'] == true,
+            },
+          );
+      if (share.shareUrl.trim().isNotEmpty) {
+        shareUrl = share.shareUrl.trim();
+      }
+    } catch (_) {
+      // Keep the legacy broadcast URL working if share-token creation fails.
+    }
+    await _openLiveRoomShareSheet(shareUrl);
   }
 
-  Future<void> _openRoomMenu() async {
-    final room = _activeRoom;
-    if (room == null) return;
+  Future<void> _openLiveRoomShareSheet(String shareUrl) async {
+    if (shareUrl.trim().isEmpty) return;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (context) {
         final theme = Theme.of(context);
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Container(
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surface,
-              borderRadius: BorderRadius.circular(28),
-            ),
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      'Broadcast menu',
-                      style: theme.textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Container(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                borderRadius: BorderRadius.circular(28),
+              ),
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Share room',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-                _MenuActionTile(
-                  icon: Icons.copy_rounded,
-                  label: 'Copy broadcast ID',
-                  onTap: () async {
-                    Navigator.of(context).pop();
-                    await _copyRoomId();
-                  },
-                ),
-                if (_isHost || _liveRoomState.permissions.canModerateRoom)
-                  _MenuActionTile(
-                    icon: Icons.bug_report_outlined,
-                    label: 'RTC debug',
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _ShareRoomActionTile(
+                    icon: Icons.chat_bubble_outline_rounded,
+                    title: 'Send in Talkflix',
+                    subtitle: 'Choose chats from your history',
                     onTap: () {
                       Navigator.of(context).pop();
-                      _openRtcDebugSheet();
+                      unawaited(_sendRoomLinkToTalkflixChats(shareUrl));
                     },
                   ),
-                _MenuActionTile(
-                  icon: _isHost
-                      ? Icons.stop_circle_outlined
-                      : Icons.logout_rounded,
-                  label: _isHost ? 'End broadcast' : 'Leave room',
-                  destructive: true,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _leaveBroadcast();
-                  },
-                ),
-              ],
+                  _ShareRoomActionTile(
+                    icon: Icons.ios_share_rounded,
+                    title: 'Share externally',
+                    subtitle: 'Use Messages, WhatsApp, Mail, and more',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      unawaited(_shareRoomExternally(shareUrl));
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -3000,104 +4412,396 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     );
   }
 
-  Future<void> _openRtcDebugSheet() async {
+  Future<void> _shareRoomExternally(String shareUrl) async {
+    try {
+      await Share.share(
+        shareUrl,
+        sharePositionOrigin: _shareOriginForContext(context),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the share sheet.')),
+      );
+    }
+  }
+
+  Rect? _shareOriginForContext(BuildContext context) {
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) return null;
+    final position = renderObject.localToGlobal(Offset.zero);
+    return position & renderObject.size;
+  }
+
+  Future<void> _sendRoomLinkToTalkflixChats(String shareUrl) async {
+    try {
+      final threads = await ref
+          .read(talkRepositoryProvider)
+          .fetchRecentThreads();
+      if (!mounted) return;
+      final selected = await showChatRecipientPicker(
+        context: context,
+        threads: threads,
+        title: 'Send room to',
+        actionLabel: 'Send',
+      );
+      if (selected.isEmpty || !mounted) return;
+      final repository = ref.read(directChatRepositoryProvider);
+      var sentCount = 0;
+      for (final thread in selected) {
+        await repository.sendTextMessage(
+          userId: thread.partnerId,
+          text: shareUrl,
+        );
+        sentCount += 1;
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            sentCount == 1
+                ? 'Room link sent.'
+                : 'Room link sent to $sentCount chats.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  void _applyActiveRoomUpdateFromPayload(
+    Map<String, dynamic> room, {
+    bool refreshFollowState = false,
+  }) {
+    final broadcast = _normalizeBroadcast(room);
+    setState(() {
+      _activeRoom = broadcast;
+      _activeRoomVersion = math.max(
+        _activeRoomVersion,
+        _roomVersionFrom(broadcast),
+      );
+      _activeSpeakerVersion = math.max(
+        _activeSpeakerVersion,
+        _speakerVersionFrom(broadcast),
+      );
+      _refreshTopologyReady(broadcast);
+      _browseType = '${broadcast['type'] ?? _browseType}';
+      _joinRequests = (broadcast['joinRequests'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+    });
+    _upsertBroadcastLocally(broadcast);
+    _syncRoomChromeState();
+    if (refreshFollowState) {
+      unawaited(_refreshHostFollowState(broadcast));
+    }
+  }
+
+  Future<bool> _saveRoomSettings({
+    required String title,
+    required String description,
+    required String language,
+    String? secondaryLanguage,
+  }) async {
+    final room = _activeRoom;
+    if (room == null) return false;
+    final payload = await _socket.emitWithAckRetry(
+      'live:room:update',
+      <String, dynamic>{
+        'broadcastId': room['id'],
+        'title': title.trim(),
+        'description': description.trim(),
+        'lang': language.trim(),
+        'lang2': secondaryLanguage?.trim(),
+      },
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return false;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to update room settings'}'
+                : 'Room settings update timed out.',
+          ),
+        ),
+      );
+      return false;
+    }
+    if (payload['broadcast'] is Map) {
+      _applyActiveRoomUpdateFromPayload(
+        Map<String, dynamic>.from(payload['broadcast'] as Map),
+        refreshFollowState: true,
+      );
+    }
+    return true;
+  }
+
+  Future<bool> _setParticipantModerator({
+    required String userId,
+    required bool isModerator,
+  }) async {
+    final room = _activeRoom;
+    if (room == null || userId.isEmpty) return false;
+    final payload = await _socket.emitWithAckRetry(
+      'live:role:update',
+      <String, dynamic>{
+        'broadcastId': room['id'],
+        'targetUserId': userId,
+        'role': isModerator ? 'moderator' : 'listener',
+      },
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return false;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to update moderators'}'
+                : 'Moderator update timed out.',
+          ),
+        ),
+      );
+      return false;
+    }
+    if (payload['broadcast'] is Map) {
+      _applyActiveRoomUpdateFromPayload(
+        Map<String, dynamic>.from(payload['broadcast'] as Map),
+      );
+    }
+    return true;
+  }
+
+  Future<bool> _saveRoomAppearance({required String backgroundTheme}) async {
+    final room = _activeRoom;
+    if (room == null) return false;
+    final payload = await _socket.emitWithAckRetry(
+      'live:room:appearance:update',
+      <String, dynamic>{
+        'broadcastId': room['id'],
+        'backgroundTheme': backgroundTheme,
+      },
+      timeout: const Duration(seconds: 5),
+      maxAttempts: 2,
+    );
+    if (!mounted) return false;
+    final ok = payload is Map && payload['ok'] == true;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            payload is Map
+                ? '${payload['message'] ?? 'Unable to update room appearance'}'
+                : 'Appearance update timed out.',
+          ),
+        ),
+      );
+      return false;
+    }
+    if (payload['broadcast'] is Map) {
+      _applyActiveRoomUpdateFromPayload(
+        Map<String, dynamic>.from(payload['broadcast'] as Map),
+      );
+    }
+    if (_activeRoom != null) {
+      setState(() {
+        _activeRoom = {
+          ..._activeRoom!,
+          'backgroundTheme': backgroundTheme.trim().toLowerCase(),
+        };
+      });
+      _syncRoomChromeState();
+    }
+    return true;
+  }
+
+  Future<void> _openRoomSettingsScreen() async {
     final room = _activeRoom;
     if (room == null) return;
-    final peerIds = _peerConnections.keys.toList()..sort();
-    final localStream = ref.read(webRtcServiceProvider).localStream;
-    final localAudioTracks = localStream?.getAudioTracks() ?? const [];
-    final hasLocalAudioTrack = localAudioTracks.isNotEmpty;
-    final localAudioTrackEnabled = hasLocalAudioTrack
-        ? localAudioTracks.any((track) => track.enabled)
-        : false;
-    final localAudioTrackIds = hasLocalAudioTrack
-        ? localAudioTracks.map((track) => track.id).toSet()
-        : const <String>{};
-    var audioSenderAttachedPeers = 0;
-    for (final connection in _peerConnections.values) {
-      try {
-        final senders = await connection.getSenders();
-        final hasAttachedAudioSender = senders.any((sender) {
-          final track = sender.track;
-          if (track == null || track.kind != 'audio') return false;
-          if (localAudioTrackIds.isEmpty) return true;
-          return localAudioTrackIds.contains(track.id);
-        });
-        if (hasAttachedAudioSender) {
-          audioSenderAttachedPeers += 1;
-        }
-      } catch (_) {}
-    }
-    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _LiveRoomSettingsScreen(
+          initialTitle: '${room['title'] ?? ''}',
+          initialDescription: '${room['description'] ?? ''}',
+          initialLanguage: '${room['lang'] ?? _language}',
+          initialSecondaryLanguage: '${room['lang2'] ?? ''}'.trim().isEmpty
+              ? null
+              : '${room['lang2']}',
+          isPrivate: _roomIsPrivate,
+          canEdit: _isHost,
+          participants: _roomParticipantsForModeration,
+          moderatorIds: _moderatorIds,
+          onSave: _saveRoomSettings,
+          onToggleModerator: _isHost
+              ? ({required String userId, required bool isModerator}) =>
+                    _setParticipantModerator(
+                      userId: userId,
+                      isModerator: isModerator,
+                    )
+              : null,
+        ),
+        fullscreenDialog: true,
+      ),
+    );
+  }
+
+  Future<void> _openRoomAppearanceSheet() async {
+    final room = _activeRoom;
+    if (room == null) return;
     await showModalBottomSheet<void>(
       context: context,
-      showDragHandle: true,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) {
+        return _LiveRoomAppearanceSheet(
+          initialBackgroundTheme: _backgroundThemeName,
+          initialMicEffect: _micEffectName,
+          initialCommentTheme: _myCommentTheme,
+          canEditBackground: _isHost,
+          onSave: _saveRoomAppearance,
+          onSaveMicEffect: _saveMyMicEffect,
+          onSaveCommentTheme: _saveMyCommentTheme,
+        );
+      },
+    );
+  }
+
+  Future<void> _openHostNoticeSheet() async {
+    if (!_isHost || _activeRoom == null) return;
+    final savedNotice = _activeRoom?['activeNotice'] is Map
+        ? Map<String, dynamic>.from(_activeRoom!['activeNotice'] as Map)
+        : const <String, dynamic>{};
+    final result = await showModalBottomSheet<_HostNoticeAction>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return _HostNoticeSheet(
+          initialSavedText: '${savedNotice['text'] ?? ''}',
+          hasSavedNotice: savedNotice.isNotEmpty,
+        );
+      },
+    );
+    if (result == null) return;
+    await _waitForRouteToSettle();
+    if (!mounted) return;
+    if (result.type == _HostNoticeActionType.save) {
+      await _saveHostJoinNotice(result.text);
+    } else if (result.type == _HostNoticeActionType.delete) {
+      await _deleteHostJoinNotice();
+    } else if (result.type == _HostNoticeActionType.send) {
+      await _sendHostNotice(result.text);
+    }
+  }
+
+  Future<void> _openHostPollSheet() async {
+    if (!_isHost || _activeRoom == null) return;
+    final questionController = TextEditingController();
+    final optionControllers = [
+      TextEditingController(),
+      TextEditingController(),
+      TextEditingController(),
+      TextEditingController(),
+    ];
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (context) {
         final theme = Theme.of(context);
         return SafeArea(
+          top: false,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'RTC debug',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text('Room: ${room['id'] ?? ''}'),
-                Text(
-                  'Role: ${_isHost ? LiveRoomRole.host.label : (_amOnStage ? LiveRoomRole.speaker.label : _liveRoomState.role.label)}',
-                ),
-                Text('On stage: $_amOnStage'),
-                Text('Socket: $_socketStatus'),
-                Text('SFU connected: $_sfuConnected'),
-                Text('Topology ready: $_topologyReady'),
-                Text('Room version: $_activeRoomVersion'),
-                Text('Peers: ${peerIds.length}'),
-                Text(
-                  'Self publish track: ${hasLocalAudioTrack ? (localAudioTrackEnabled ? 'enabled' : 'disabled') : 'missing'}',
-                ),
-                Text(
-                  'Audio sender attached peers: $audioSenderAttachedPeers/${peerIds.length}',
-                ),
-                Text('Audio recovery attempts: $_audioRecoveryAttempts'),
-                const SizedBox(height: 10),
-                Text(
-                  'Recent transitions',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                if (_rtcTransitionLog.isEmpty)
-                  const Text('No transitions yet.')
-                else
-                  ..._rtcTransitionLog.reversed.map(
-                    (entry) => Padding(
-                      padding: const EdgeInsets.only(bottom: 2),
-                      child: Text('- $entry', style: theme.textTheme.bodySmall),
+            padding: EdgeInsets.fromLTRB(
+              16,
+              0,
+              16,
+              MediaQuery.viewInsetsOf(context).bottom + 16,
+            ),
+            child: Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.86,
+              ),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                borderRadius: BorderRadius.circular(28),
+              ),
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  Text(
+                    'Create poll',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                const SizedBox(height: 8),
-                if (peerIds.isEmpty)
-                  const Text('No peers connected.')
-                else
-                  ...peerIds.map((id) {
-                    final state = _peerStates[id] ?? 'unknown';
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text('- $id: $state'),
-                    );
-                  }),
-              ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: questionController,
+                    autofocus: true,
+                    maxLength: 180,
+                    textAlignVertical: TextAlignVertical.top,
+                    decoration: const InputDecoration(
+                      labelText: 'Question',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  for (var i = 0; i < optionControllers.length; i++) ...[
+                    TextField(
+                      controller: optionControllers[i],
+                      maxLength: 80,
+                      decoration: InputDecoration(
+                        labelText: i < 2
+                            ? 'Option ${i + 1}'
+                            : 'Option ${i + 1} (optional)',
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  FilledButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop(<String, dynamic>{
+                        'question': questionController.text.trim(),
+                        'options': optionControllers
+                            .map((controller) => controller.text.trim())
+                            .where((text) => text.isNotEmpty)
+                            .toList(),
+                      });
+                    },
+                    icon: const Icon(Icons.poll_outlined),
+                    label: const Text('Start poll'),
+                  ),
+                ],
+              ),
             ),
           ),
         );
       },
+    );
+    questionController.dispose();
+    for (final controller in optionControllers) {
+      controller.dispose();
+    }
+    if (result == null) return;
+    await _createHostPoll(
+      question: '${result['question'] ?? ''}',
+      options: (result['options'] as List<dynamic>? ?? const [])
+          .map((option) => '$option')
+          .toList(),
     );
   }
 
@@ -3135,13 +4839,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
               targetUserId: userId,
               hostUserId: hostUserId,
             );
-    if (!canModerate) {
-      _openProfile(userId);
-      return;
-    }
     final targetOnStage = _isUserOnStage(userId);
     final targetIsHost = hostUserId.isNotEmpty && hostUserId == userId;
     final targetName = _displayNameForUser(userId);
+    final targetIsModerator = _moderatorIds.contains(userId);
     final canManageStage = AppConfig.liveRequireHostModeration
         ? _isHost
         : canModerate;
@@ -3152,8 +4853,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           targetUserId: userId,
           hostUserId: hostUserId,
         );
-    await showModalBottomSheet<void>(
+    final selectedAction = await showModalBottomSheet<String>(
       context: context,
+      useRootNavigator: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
         final theme = Theme.of(context);
@@ -3179,159 +4881,203 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                     subtitle: const Text('Participant actions'),
                   ),
                   ListTile(
-                    leading: const Icon(Icons.volume_off_rounded),
-                    title: const Text('Mute participant'),
-                    enabled: canManageStage,
-                    onTap: !canManageStage
-                        ? null
-                        : () async {
-                            Navigator.of(context).pop();
-                            dynamic payload = const <String, dynamic>{
-                              'ok': true,
-                            };
-                            if (AppConfig.liveUseAckModeration) {
-                              payload = await _socket.emitWithAckRetry(
-                                'live:user:mute',
-                                <String, dynamic>{
-                                  'broadcastId': room['id'],
-                                  'targetUserId': userId,
-                                  'muted': true,
-                                },
-                                timeout: const Duration(seconds: 5),
-                                maxAttempts: 2,
-                              );
-                            } else {
-                              _socket.emit('live:user:mute', <String, dynamic>{
-                                'broadcastId': room['id'],
-                                'targetUserId': userId,
-                                'muted': true,
-                              });
-                            }
-                            if (!mounted) return;
-                            final ok = payload is Map && payload['ok'] == true;
-                            if (!ok) {
-                              ScaffoldMessenger.of(this.context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    payload is Map
-                                        ? '${payload['message'] ?? 'Unable to mute participant'}'
-                                        : 'Mute request timed out.',
-                                  ),
-                                ),
-                              );
-                              return;
-                            }
-                            ScaffoldMessenger.of(this.context).showSnackBar(
-                              const SnackBar(content: Text('Mute signal sent')),
-                            );
-                          },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.vertical_align_bottom_rounded),
-                    title: const Text('Remove from stage'),
-                    enabled:
-                        canRemoveFromStage && targetOnStage && !targetIsHost,
-                    onTap:
-                        !(canRemoveFromStage && targetOnStage && !targetIsHost)
-                        ? null
-                        : () async {
-                            Navigator.of(context).pop();
-                            dynamic payload = const <String, dynamic>{
-                              'ok': true,
-                            };
-                            if (AppConfig.liveUseAckModeration) {
-                              payload = await _socket.emitWithAckRetry(
-                                'live:speaker:remove',
-                                <String, dynamic>{
-                                  'broadcastId': room['id'],
-                                  'targetUserId': userId,
-                                },
-                                timeout: const Duration(seconds: 5),
-                                maxAttempts: 2,
-                              );
-                            } else {
-                              _socket.emit(
-                                'live:speaker:remove',
-                                <String, dynamic>{
-                                  'broadcastId': room['id'],
-                                  'targetUserId': userId,
-                                },
-                              );
-                            }
-                            if (!mounted) return;
-                            final ok = payload is Map && payload['ok'] == true;
-                            if (!ok) {
-                              ScaffoldMessenger.of(this.context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    payload is Map
-                                        ? '${payload['message'] ?? 'Unable to remove from stage'}'
-                                        : 'Remove-from-stage timed out.',
-                                  ),
-                                ),
-                              );
-                              return;
-                            }
-                            final broadcast = _normalizeBroadcast(
-                              Map<String, dynamic>.from(
-                                payload['broadcast'] as Map? ?? room,
-                              ),
-                            );
-                            setState(() {
-                              _activeRoom = broadcast;
-                              _activeRoomVersion = _roomVersionFrom(broadcast);
-                              _activeSpeakerVersion = _speakerVersionFrom(
-                                broadcast,
-                              );
-                              _refreshTopologyReady(broadcast);
-                              _joinRequests =
-                                  (broadcast['joinRequests']
-                                              as List<dynamic>? ??
-                                          const [])
-                                      .whereType<Map>()
-                                      .map(
-                                        (item) =>
-                                            Map<String, dynamic>.from(item),
-                                      )
-                                      .toList();
-                            });
-                            _syncRoomChromeState();
-                            _queueRtcSync(immediate: true);
-                            ScaffoldMessenger.of(this.context).showSnackBar(
-                              const SnackBar(content: Text('Speaker removed')),
-                            );
-                          },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.person_remove_outlined),
-                    title: const Text('Remove from room'),
+                    leading: const Icon(Icons.person_outline_rounded),
+                    title: const Text('View profile'),
                     onTap: () {
-                      Navigator.of(context).pop();
-                      _socket.emit('live:user:kick', <String, dynamic>{
-                        'broadcastId': room['id'],
-                        'targetUserId': userId,
-                      });
-                      ScaffoldMessenger.of(this.context).showSnackBar(
-                        const SnackBar(content: Text('Removal signal sent')),
-                      );
+                      Navigator.of(context).pop('profile');
                     },
                   ),
+                  if (canModerate)
+                    ListTile(
+                      leading: const Icon(Icons.volume_off_rounded),
+                      title: const Text('Mute participant'),
+                      enabled: canManageStage,
+                      onTap: !canManageStage
+                          ? null
+                          : () async {
+                              Navigator.of(context).pop();
+                              dynamic payload = const <String, dynamic>{
+                                'ok': true,
+                              };
+                              if (AppConfig.liveUseAckModeration) {
+                                payload = await _socket.emitWithAckRetry(
+                                  'live:user:mute',
+                                  <String, dynamic>{
+                                    'broadcastId': room['id'],
+                                    'targetUserId': userId,
+                                    'muted': true,
+                                  },
+                                  timeout: const Duration(seconds: 5),
+                                  maxAttempts: 2,
+                                );
+                              } else {
+                                _socket
+                                    .emit('live:user:mute', <String, dynamic>{
+                                      'broadcastId': room['id'],
+                                      'targetUserId': userId,
+                                      'muted': true,
+                                    });
+                              }
+                              if (!mounted) return;
+                              final ok =
+                                  payload is Map && payload['ok'] == true;
+                              if (!ok) {
+                                ScaffoldMessenger.of(this.context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      payload is Map
+                                          ? '${payload['message'] ?? 'Unable to mute participant'}'
+                                          : 'Mute request timed out.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Mute signal sent'),
+                                ),
+                              );
+                            },
+                    ),
+                  if (canModerate)
+                    ListTile(
+                      leading: const Icon(Icons.vertical_align_bottom_rounded),
+                      title: const Text('Remove from speakers'),
+                      enabled:
+                          canRemoveFromStage && targetOnStage && !targetIsHost,
+                      onTap:
+                          !(canRemoveFromStage &&
+                              targetOnStage &&
+                              !targetIsHost)
+                          ? null
+                          : () async {
+                              Navigator.of(context).pop();
+                              dynamic payload = const <String, dynamic>{
+                                'ok': true,
+                              };
+                              if (AppConfig.liveUseAckModeration) {
+                                payload = await _socket.emitWithAckRetry(
+                                  'live:speaker:remove',
+                                  <String, dynamic>{
+                                    'broadcastId': room['id'],
+                                    'targetUserId': userId,
+                                  },
+                                  timeout: const Duration(seconds: 5),
+                                  maxAttempts: 2,
+                                );
+                              } else {
+                                _socket.emit(
+                                  'live:speaker:remove',
+                                  <String, dynamic>{
+                                    'broadcastId': room['id'],
+                                    'targetUserId': userId,
+                                  },
+                                );
+                              }
+                              if (!mounted) return;
+                              final ok =
+                                  payload is Map && payload['ok'] == true;
+                              if (!ok) {
+                                ScaffoldMessenger.of(this.context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      payload is Map
+                                          ? '${payload['message'] ?? 'Unable to remove from speakers'}'
+                                          : 'Remove-from-speakers timed out.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+                              final broadcast = _normalizeBroadcast(
+                                Map<String, dynamic>.from(
+                                  payload['broadcast'] as Map? ?? room,
+                                ),
+                              );
+                              setState(() {
+                                _activeRoom = broadcast;
+                                _activeRoomVersion = _roomVersionFrom(
+                                  broadcast,
+                                );
+                                _activeSpeakerVersion = _speakerVersionFrom(
+                                  broadcast,
+                                );
+                                _refreshTopologyReady(broadcast);
+                                _syncLiveTransientStateFromRoom(broadcast);
+                                _joinRequests =
+                                    (broadcast['joinRequests']
+                                                as List<dynamic>? ??
+                                            const [])
+                                        .whereType<Map>()
+                                        .map(
+                                          (item) =>
+                                              Map<String, dynamic>.from(item),
+                                        )
+                                        .toList();
+                              });
+                              _syncRoomChromeState();
+                              _queueRtcSync(immediate: true);
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Speaker removed'),
+                                ),
+                              );
+                            },
+                    ),
+                  if (canModerate)
+                    ListTile(
+                      leading: const Icon(Icons.person_remove_outlined),
+                      title: const Text('Remove from room'),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _socket.emit('live:user:kick', <String, dynamic>{
+                          'broadcastId': room['id'],
+                          'targetUserId': userId,
+                        });
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          const SnackBar(content: Text('Removal signal sent')),
+                        );
+                      },
+                    ),
                   if (_liveRoomState.permissions.canPromoteModerators)
                     ListTile(
                       leading: const Icon(Icons.admin_panel_settings_outlined),
-                      title: const Text('Promote to moderator'),
-                      onTap: () {
+                      title: Text(
+                        targetIsModerator
+                            ? 'Remove moderator role'
+                            : 'Make moderator',
+                      ),
+                      onTap: () async {
                         Navigator.of(context).pop();
-                        _socket.emit('live:role:update', <String, dynamic>{
-                          'broadcastId': room['id'],
-                          'targetUserId': userId,
-                          'role': 'moderator',
-                        });
+                        final success = await _setParticipantModerator(
+                          userId: userId,
+                          isModerator: !targetIsModerator,
+                        );
+                        if (!mounted || !success) return;
                         ScaffoldMessenger.of(this.context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Role update signal sent'),
+                          SnackBar(
+                            content: Text(
+                              targetIsModerator
+                                  ? 'Moderator removed'
+                                  : 'Moderator added',
+                            ),
                           ),
                         );
+                      },
+                    ),
+                  if (userId != _meId)
+                    ListTile(
+                      leading: Icon(
+                        Icons.report_outlined,
+                        color: theme.colorScheme.error,
+                      ),
+                      title: Text(
+                        'Report participant',
+                        style: TextStyle(color: theme.colorScheme.error),
+                      ),
+                      onTap: () {
+                        Navigator.of(context).pop('report');
                       },
                     ),
                   const SizedBox(height: 8),
@@ -3342,11 +5088,72 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         );
       },
     );
+    if (!mounted || selectedAction == null) return;
+    await _waitForRouteToSettle();
+    if (!mounted) return;
+    if (selectedAction == 'profile') {
+      _openProfile(userId);
+    } else if (selectedAction == 'report') {
+      await _openReportParticipantSheet(
+        userId: userId,
+        displayName: targetName,
+      );
+    }
   }
 
   void _onParticipantLongPress(String userId) {
     if (userId.isEmpty) return;
     unawaited(_openParticipantActions(userId));
+  }
+
+  Future<void> _openReportParticipantSheet({
+    required String userId,
+    required String displayName,
+  }) async {
+    final result = await showModalBottomSheet<_ParticipantReportResult>(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return _ParticipantReportSheet(
+          displayName: displayName,
+          permissionService: _permissionService,
+        );
+      },
+    );
+    if (result == null) return;
+    await _waitForRouteToSettle();
+    if (!mounted) return;
+    try {
+      await ref
+          .read(apiClientProvider)
+          .postJson(
+            '/users/$userId/report',
+            body: <String, dynamic>{
+              'reason': result.reason,
+              'details': result.details,
+              'evidence': result.proofs
+                  .map(
+                    (proof) => <String, dynamic>{
+                      'name': proof.name,
+                      'mimeType': proof.mimeType,
+                      'dataUrl': proof.dataUrl,
+                    },
+                  )
+                  .toList(),
+            },
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Report submitted.')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
   }
 
   Future<void> _openModerationControlsSheet() async {
@@ -3389,7 +5196,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                   if (canManageRequests)
                     ListTile(
                       leading: const Icon(Icons.pan_tool_alt_rounded),
-                      title: const Text('Review stage requests'),
+                      title: const Text('Review speaker requests'),
                       onTap: () {
                         Navigator.of(context).pop();
                         unawaited(_openJoinRequestsSheet());
@@ -3405,7 +5212,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                   ),
                   ListTile(
                     leading: const Icon(Icons.lock_outline_rounded),
-                    title: const Text('Lock stage (signal)'),
+                    title: const Text('Lock speakers (signal)'),
                     onTap: () {
                       Navigator.of(context).pop();
                       _socket.emit('live:stage:lock', <String, dynamic>{
@@ -3413,7 +5220,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                         'locked': true,
                       });
                       ScaffoldMessenger.of(this.context).showSnackBar(
-                        const SnackBar(content: Text('Stage lock signal sent')),
+                        const SnackBar(
+                          content: Text('Speaker lock signal sent'),
+                        ),
                       );
                     },
                   ),
@@ -3471,7 +5280,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                     Row(
                       children: [
                         Text(
-                          'Stage Requests',
+                          'Go live requests',
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w700,
                           ),
@@ -3539,6 +5348,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   Future<void> _openAudienceSheet() async {
     if (_activeRoom == null) return;
     final listeners = _audienceMembers;
+    final audienceCount = _activeAudienceCount;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -3561,7 +5371,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 Row(
                   children: [
                     Text(
-                      'Listeners',
+                      'Audience',
                       style: theme.textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
@@ -3579,7 +5389,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                         borderRadius: BorderRadius.circular(999),
                       ),
                       child: Text(
-                        '${listeners.length}',
+                        compactCount(audienceCount),
                         style: theme.textTheme.labelMedium?.copyWith(
                           color: theme.colorScheme.primary,
                           fontWeight: FontWeight.w800,
@@ -3597,7 +5407,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 if (listeners.isEmpty)
                   const Expanded(
                     child: Center(
-                      child: Text('No listeners in this room yet.'),
+                      child: Text('No audience members in this room yet.'),
                     ),
                   )
                 else
@@ -3614,7 +5424,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                         final listener = listeners[index];
                         final userId = '${listener['userId'] ?? ''}';
                         final listenerName =
-                            '${listener['name'] ?? 'Listener'}';
+                            '${listener['name'] ?? 'Audience member'}';
                         return ListTile(
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 2,
@@ -3678,7 +5488,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     );
   }
 
-  List<Map<String, dynamic>> get _filteredBroadcasts => _broadcasts
+  List<Map<String, dynamic>> get _baseBrowseBroadcasts => _broadcasts
       .where((room) => '${room['type'] ?? 'audio'}' == _browseType)
       .where(
         (room) => room['isPrivate'] == true
@@ -3687,22 +5497,81 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       )
       .toList();
 
+  List<String> _roomBrowseLanguages(Map<String, dynamic> room) {
+    final languages = <String>[];
+    for (final value in [room['lang'], room['lang2']]) {
+      final language = '${value ?? ''}'.trim();
+      if (language.isNotEmpty && !languages.contains(language)) {
+        languages.add(language);
+      }
+    }
+    return languages;
+  }
+
+  List<String> get _availableBrowseLanguages {
+    final seen = <String>{};
+    final languages = <String>[];
+    for (final room in _baseBrowseBroadcasts) {
+      for (final language in _roomBrowseLanguages(room)) {
+        final key = language.toLowerCase();
+        if (seen.add(key)) {
+          languages.add(language);
+        }
+      }
+    }
+    languages.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return languages;
+  }
+
+  String? get _effectiveBrowseLanguage {
+    final selected = _browseLanguage?.trim();
+    if (selected == null || selected.isEmpty) return null;
+    final available = _availableBrowseLanguages;
+    for (final language in available) {
+      if (language.toLowerCase() == selected.toLowerCase()) {
+        return language;
+      }
+    }
+    return null;
+  }
+
+  List<Map<String, dynamic>> get _filteredBroadcasts {
+    final selectedLanguage = _effectiveBrowseLanguage;
+    return _baseBrowseBroadcasts.where((room) {
+      if (_browseType != 'audio' || selectedLanguage == null) return true;
+      return _roomBrowseLanguages(room).any(
+        (language) => language.toLowerCase() == selectedLanguage.toLowerCase(),
+      );
+    }).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final socket = ref.watch(socketServiceProvider);
 
-    return Scaffold(
-      backgroundColor: _activeRoom != null && !_roomUsesVideo
-          ? _audioRoomBackground
+    final inImmersiveBroadcastRoom = _activeRoom != null;
+    final inAudioOnlyImmersiveRoom =
+        inImmersiveBroadcastRoom && !_roomUsesVideo;
+    final scaffold = Scaffold(
+      backgroundColor: inImmersiveBroadcastRoom
+          ? (inAudioOnlyImmersiveRoom ? Colors.transparent : Colors.black)
           : theme.colorScheme.surface,
-      body: SafeArea(
-        bottom: _activeRoom == null,
-        child: _activeRoom == null
-            ? _buildHome(theme, socket.status)
-            : _buildRoom(theme, socket.status),
-      ),
+      resizeToAvoidBottomInset: !inImmersiveBroadcastRoom,
+      extendBodyBehindAppBar: inImmersiveBroadcastRoom,
+      body: inImmersiveBroadcastRoom
+          ? _buildRoom(theme, socket.status)
+          : SafeArea(bottom: true, child: _buildHome(theme, socket.status)),
     );
+    if (inImmersiveBroadcastRoom && _roomUsesVideo) {
+      return AnnotatedRegion<SystemUiOverlayStyle>(
+        value: SystemUiOverlayStyle.light.copyWith(
+          statusBarColor: Colors.transparent,
+        ),
+        child: scaffold,
+      );
+    }
+    return scaffold;
   }
 
   Widget _buildHome(ThemeData theme, String socketStatus) {
@@ -3722,18 +5591,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _MiniModeSwitch(
-                      leftLabel: 'Broadcast',
-                      rightLabel: 'Groups',
-                      value: _liveMode,
-                      onChanged: (value) => setState(() {
-                        _liveMode = value;
-                        ref.read(liveModeProvider.notifier).state = value;
-                      }),
-                    ),
-                  ),
+                  const Spacer(),
                   const SizedBox(width: 8),
                   IconButton(
                     onPressed: _refreshBroadcasts,
@@ -3762,81 +5620,17 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 ),
               ],
               const SizedBox(height: 14),
-              if (_liveMode == 'broadcast') ...[
-                _buildHeroCard(theme),
-                const SizedBox(height: 14),
-                _buildBroadcastTypeSwitcher(theme),
+              _buildBroadcastTypeSwitcher(theme),
+              if (_browseType == 'audio' &&
+                  _availableBrowseLanguages.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _buildBrowseLanguageDropdown(theme),
               ],
             ],
           ),
         ),
-        Expanded(
-          child: _liveMode == 'groups'
-              ? _buildGroupsPlaceholder(theme)
-              : _buildBroadcastList(theme, socketStatus),
-        ),
+        Expanded(child: _buildBroadcastList(theme, socketStatus)),
       ],
-    );
-  }
-
-  Widget _buildHeroCard(ThemeData theme) {
-    final activeCount = _filteredBroadcasts.length;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(26),
-        gradient: LinearGradient(
-          colors: [
-            theme.colorScheme.primary.withValues(alpha: 0.16),
-            theme.colorScheme.surfaceContainerHighest,
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 11,
-                  vertical: 7,
-                ),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  _browseType == 'audio'
-                      ? 'Broadcast / Audio'
-                      : 'Broadcast / Video',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: theme.colorScheme.onPrimary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '$activeCount live now',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Text(
-            _browseType == 'audio'
-                ? 'Listen to live audio rooms, jump into the comments, and request a speaker slot when the conversation fits.'
-                : 'Join live video broadcasts with a host, three stage speakers, and a room full of listeners.',
-            style: theme.textTheme.bodyMedium?.copyWith(height: 1.35),
-          ),
-        ],
-      ),
     );
   }
 
@@ -3857,42 +5651,53 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       selected: _browseType,
       onChanged: (value) => setState(() {
         _browseType = value;
+        _browseLanguage = null;
         ref.read(liveBrowseTypeProvider.notifier).state = value;
       }),
     );
   }
 
-  Widget _buildGroupsPlaceholder(ThemeData theme) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-      children: [
-        Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainer,
-            borderRadius: BorderRadius.circular(30),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Groups are coming next',
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Broadcast is the default live mode for now. Group rooms will plug into this screen later without changing the navigation pattern.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  height: 1.4,
-                ),
-              ),
-            ],
-          ),
+  Widget _buildBrowseLanguageDropdown(ThemeData theme) {
+    final languages = _availableBrowseLanguages;
+    final selectedLanguage = _effectiveBrowseLanguage;
+    return DropdownButtonFormField<String>(
+      initialValue: selectedLanguage,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: 'Language',
+        prefixIcon: const Icon(Icons.language_rounded),
+        filled: true,
+        fillColor: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.55,
         ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 12,
+        ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      hint: const Text('All active languages'),
+      items: [
+        const DropdownMenuItem<String>(
+          value: '',
+          child: Text('All active languages'),
+        ),
+        for (final language in languages)
+          DropdownMenuItem<String>(value: language, child: Text(language)),
       ],
+      onChanged: (value) {
+        setState(() {
+          final next = value?.trim();
+          _browseLanguage = next == null || next.isEmpty ? null : next;
+        });
+      },
     );
   }
 
@@ -3947,21 +5752,22 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       itemBuilder: (context, index) {
         final room = _filteredBroadcasts[index];
         return _BroadcastCard(
+          roomId: '${room['id'] ?? room['_id'] ?? ''}',
           title: '${room['title'] ?? 'Untitled'}',
           type: '${room['type'] ?? 'audio'}',
           language: '${room['lang'] ?? 'EN'}',
-          secondaryLanguage: room['lang2']?.toString(),
+          secondaryLanguage: '${room['lang2'] ?? ''}'.trim().isEmpty
+              ? null
+              : '${room['lang2']}',
           description: room['description']?.toString(),
           host: '${room['host'] ?? 'Host'}',
           hostPhotoUrl: '${room['hostPhoto'] ?? ''}',
-          hostFlagCode: _flagCode('${room['hostNationalityCode'] ?? ''}'),
           speakers: (room['speakers'] as List<dynamic>? ?? const [])
               .whereType<Map>()
               .map((s) => Map<String, dynamic>.from(s))
               .toList(),
           audienceCount: room['audienceCount'] as int? ?? 0,
           attendeeCount: room['attendees'] as int? ?? 0,
-          commentsCount: (room['comments'] as List<dynamic>?)?.length ?? 0,
           onJoin: socketStatus == 'connected'
               ? () => _joinBroadcast(room)
               : null,
@@ -3973,197 +5779,543 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Widget _buildRoom(ThemeData theme, String socketStatus) {
-    final room = _activeRoom!;
-    final listenerCount = room['audienceCount'] as int? ?? 0;
-
     if (!_roomUsesVideo) {
       return _buildImmersiveAudioRoom(theme, socketStatus);
     }
+    return _buildImmersiveVideoRoom(theme, socketStatus);
+  }
 
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(18, 8, 18, 14),
-          child: Column(
+  Widget _buildImmersiveVideoRoom(ThemeData theme, String socketStatus) {
+    final room = _activeRoom!;
+    final mq = MediaQuery.of(context);
+    final topInset = mq.padding.top;
+    final bottomInset = mq.viewInsets.bottom;
+    final safeAreaBottom = mq.padding.bottom;
+    final isCommenting = _commentFocusNode.hasFocus || bottomInset > 0;
+    final composerBottomPadding = bottomInset > 0 ? bottomInset : 8.0;
+    final iPhoneCommentClearance =
+        Theme.of(context).platform == TargetPlatform.iOS ? safeAreaBottom : 0.0;
+    final composerTop = 56 + composerBottomPadding + iPhoneCommentClearance;
+    final pageTop = topInset + (socketStatus == 'connected' ? 118.0 : 160.0);
+
+    return MediaQuery.removePadding(
+      context: context,
+      removeTop: true,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned.fill(child: _buildLiveVideoGrid(theme)),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            height: 220,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.72),
+                    Colors.black.withValues(alpha: 0.08),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+          PageView(
+            key: const PageStorageKey<String>('video-room-pages'),
+            controller: _videoRoomPageController,
+            onPageChanged: (index) =>
+                setState(() => _videoRoomPageIndex = index),
             children: [
-              Row(
+              const SizedBox.expand(),
+              _buildVideoCommentsScreen(
+                theme,
+                top: pageTop,
+                bottom: composerTop,
+                isCommenting: isCommenting,
+              ),
+            ],
+          ),
+          Positioned(
+            right: 0,
+            bottom: 100,
+            width: 120,
+            height: 400,
+            child: FlyingReactions(stream: _reactionController.stream),
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            top: topInset + 6,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildImmersiveAudioHeader(theme, room),
+                const SizedBox(height: 8),
+                _buildVideoPageIndicator(theme),
+                if (socketStatus != 'connected') ...[
+                  const SizedBox(height: 8),
+                  RealtimeWarningBanner(
+                    status: socketStatus,
+                    scopeLabel: 'Live room',
+                    connectingMessage: 'Reconnecting to the broadcast...',
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 64 + composerBottomPadding + iPhoneCommentClearance,
+            child: _buildVideoStageInviteDock(theme),
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 120 + composerBottomPadding + iPhoneCommentClearance,
+            child: _buildImmersiveTopActions(theme),
+          ),
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: composerBottomPadding,
+            child: _buildImmersiveComposer(theme, socketStatus, isCommenting),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVideoCommentsScreen(
+    ThemeData theme, {
+    required double top,
+    required double bottom,
+    required bool isCommenting,
+  }) {
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: isCommenting ? 0.34 : 0.22),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(16, top, 16, bottom),
+        child: _comments.isEmpty
+            ? const _AudioEmptyPage(
+                icon: Icons.chat_bubble_outline_rounded,
+                title: 'No comments yet',
+                subtitle: 'Live comments will appear here over the video.',
+              )
+            : _buildImmersiveComments(theme, condensed: isCommenting),
+      ),
+    );
+  }
+
+  Widget _buildVideoPageIndicator(ThemeData theme) {
+    const labels = ['Live', 'Comments'];
+    return SizedBox(
+      height: 34,
+      child: Row(
+        children: List.generate(labels.length, (index) {
+          final selected = _videoRoomPageIndex == index;
+          return Expanded(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () {
+                _videoRoomPageController.animateToPage(
+                  index,
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                );
+              },
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  IconButton(
-                    onPressed: _openRoomMenu,
-                    icon: const Icon(Icons.menu_rounded),
-                  ),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _AutoScrollingTitle(
-                          text: '${room['title'] ?? 'Broadcast'}',
-                          style: theme.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${room['host'] ?? 'Host'} • ${_roomUsesVideo ? 'Video' : 'Audio'} broadcast',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+                  Text(
+                    labels[index],
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: selected ? Colors.white : Colors.white70,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
-                  if (_isHost)
-                    Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        IconButton(
-                          onPressed: _openJoinRequestsSheet,
-                          tooltip: 'Raised hands',
-                          icon: Icon(
-                            _pendingJoinRequestCount > 0
-                                ? Icons.pan_tool_alt_rounded
-                                : Icons.front_hand_outlined,
-                          ),
-                        ),
-                        if (_joinRequests.isNotEmpty)
-                          Positioned(
-                            right: 6,
-                            top: 6,
-                            child: Container(
-                              width: 18,
-                              height: 18,
-                              decoration: BoxDecoration(
-                                color: theme.colorScheme.primary,
-                                shape: BoxShape.circle,
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                _pendingJoinRequestCountLabel,
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onPrimary,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 10,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
+                  const SizedBox(height: 5),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    height: 3,
+                    width: selected ? 54 : 22,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? Colors.white
+                          : Colors.white.withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(999),
                     ),
-                  IconButton(
-                    onPressed: _openRoomMenu,
-                    icon: const Icon(Icons.more_horiz),
                   ),
                 ],
               ),
-              if (socketStatus != 'connected') ...[
-                const SizedBox(height: 10),
-                RealtimeWarningBanner(
-                  status: socketStatus,
-                  scopeLabel: 'Live room',
-                  connectingMessage: 'Reconnecting to the broadcast...',
-                ),
-              ],
-            ],
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildLiveVideoGrid(ThemeData theme) {
+    final participants = _videoLiveParticipants;
+    if (participants.isEmpty) {
+      final room = _activeRoom;
+      return ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: _AvatarBubble(
+            photoUrl: '${room?['hostPhoto'] ?? ''}',
+            size: 120,
+            fallback: '${room?['host'] ?? 'Host'}',
           ),
         ),
-        Expanded(
-          child: Container(
-            margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerLow,
-              borderRadius: BorderRadius.circular(32),
-            ),
-            child: Column(
+      );
+    }
+
+    if (participants.length == 1) {
+      return _buildLiveVideoTile(
+        theme,
+        participant: participants.first,
+        rounded: false,
+      );
+    }
+
+    if (participants.length == 2) {
+      return Column(
+        children: [
+          Expanded(
+            child: _buildLiveVideoTile(theme, participant: participants[0]),
+          ),
+          Expanded(
+            child: _buildLiveVideoTile(theme, participant: participants[1]),
+          ),
+        ],
+      );
+    }
+
+    if (participants.length == 3) {
+      return Column(
+        children: [
+          Expanded(
+            child: _buildLiveVideoTile(theme, participant: participants[0]),
+          ),
+          Expanded(
+            child: Row(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
-                  child: Row(
-                    children: [
-                      _MetricChip(
-                        icon: Icons.graphic_eq,
-                        label: _roomUsesVideo ? 'Video room' : 'Audio room',
-                      ),
-                      const SizedBox(width: 10),
-                      _MetricChip(
-                        icon: Icons.headset,
-                        label: '$listenerCount listening',
-                      ),
-                      const SizedBox(width: 10),
-                      _MetricChip(
-                        icon: Icons.chat_bubble_outline,
-                        label: '${_comments.length} comments',
-                      ),
-                    ],
+                Expanded(
+                  child: _buildLiveVideoTile(
+                    theme,
+                    participant: participants[1],
                   ),
                 ),
                 Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                    child: Column(
-                      children: [
-                        _buildStageGrid(theme),
-                        const SizedBox(height: 14),
-                        _buildRoomControls(theme),
-                        const SizedBox(height: 14),
-                        Expanded(child: _buildComments(theme)),
-                      ],
+                  child: _buildLiveVideoTile(
+                    theme,
+                    participant: participants[2],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    return GridView.builder(
+      padding: EdgeInsets.zero,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        childAspectRatio: 1,
+      ),
+      itemCount: 4,
+      itemBuilder: (context, index) =>
+          _buildLiveVideoTile(theme, participant: participants[index]),
+    );
+  }
+
+  Widget _buildLiveVideoTile(
+    ThemeData theme, {
+    required Map<String, dynamic> participant,
+    bool rounded = false,
+  }) {
+    final userId = '${participant['userId'] ?? participant['id'] ?? ''}'.trim();
+    final name = '${participant['name'] ?? 'Live user'}'.trim();
+    final renderer = userId == _meId
+        ? _localRenderer
+        : _remoteRenderers[userId];
+    final stream = renderer?.srcObject;
+    final hasLiveVideo =
+        renderer != null &&
+        stream != null &&
+        stream.getVideoTracks().any((track) => track.enabled);
+    final role = '${participant['role'] ?? ''}'.toLowerCase().contains('host')
+        ? 'Host'
+        : 'Live';
+
+    return ClipRRect(
+      borderRadius: rounded ? BorderRadius.circular(18) : BorderRadius.zero,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(
+            color: Colors.black,
+            child: hasLiveVideo
+                ? RTCVideoView(
+                    renderer,
+                    mirror: userId == _meId,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  )
+                : Center(
+                    child: _AvatarBubble(
+                      photoUrl: '${participant['photo'] ?? ''}',
+                      size: 96,
+                      fallback: name,
+                    ),
+                  ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: 92,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.62),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 10,
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: role == 'Host'
+                        ? _audioRoomAccent
+                        : Colors.black.withValues(alpha: 0.42),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    role,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
                 ),
-                _buildCommentComposer(theme, socketStatus),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                if (userId == _meId && !_localMicEnabled)
+                  const Icon(
+                    Icons.mic_off_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  )
+                else if (_activeSpeakers.contains(userId))
+                  const Icon(
+                    Icons.graphic_eq_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// TikTok-style chip: host sees who raised their hand to go live; audience
+  /// sees a lightweight “waiting” state after requesting the stage.
+  Widget _buildVideoStageInviteDock(ThemeData theme) {
+    final canReviewJoinRequests =
+        _isHost || _liveRoomState.permissions.canManageStageRequests;
+    if (canReviewJoinRequests && _joinRequests.isNotEmpty) {
+      final count = _joinRequests.length;
+      final firstName = '${_joinRequests.first['name'] ?? 'Someone'}'.trim();
+      final subtitle = count == 1
+          ? '$firstName wants to go live'
+          : '$count people want to go live';
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: GestureDetector(
+          onTap: _openJoinRequestsSheet,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.45),
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(color: Colors.white24),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 12, 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _videoJoinRequestAvatarStack(),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Go live requests',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.9),
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: Colors.white.withValues(alpha: 0.75),
+                    size: 22,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    if (!_isHost && !_amOnStage && _handRaised) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.waving_hand_rounded,
+                  color: theme.colorScheme.primary,
+                  size: 22,
+                ),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    'Waiting for the host to let you speak',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: Colors.white.withValues(alpha: 0.92),
+                      height: 1.25,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
         ),
-      ],
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _videoJoinRequestAvatarStack() {
+    const diameter = 34.0;
+    const overlap = 20.0;
+    final show = _joinRequests.take(4).toList();
+    if (show.isEmpty) return const SizedBox.shrink();
+    final w = diameter + (show.length - 1) * overlap;
+    return SizedBox(
+      width: w,
+      height: diameter,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          for (var i = 0; i < show.length; i++)
+            Positioned(
+              left: i * overlap,
+              child: Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: ClipOval(
+                  child: _AvatarBubble(
+                    photoUrl: '${show[i]['photo'] ?? ''}',
+                    size: diameter - 4,
+                    fallback: '${show[i]['name'] ?? '?'}',
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
   Widget _buildImmersiveAudioRoom(ThemeData theme, String socketStatus) {
     final room = _activeRoom!;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final topInset = MediaQuery.of(context).padding.top;
     final safeAreaBottom = MediaQuery.of(context).padding.bottom;
     final isCommenting = _commentFocusNode.hasFocus || bottomInset > 0;
-    final composerBottomPadding = bottomInset > 0 ? bottomInset : 18.0;
-    const sideRailBottomPadding = 18.0;
+    final composerBottomPadding = bottomInset > 0 ? bottomInset : 8.0;
     final iPhoneCommentClearance =
         Theme.of(context).platform == TargetPlatform.iOS ? safeAreaBottom : 0.0;
-    const stageHeight = 150.0;
-    final stageTop = socketStatus == 'connected' ? 138.0 : 178.0;
-    final commentsTop = stageTop + stageHeight + 6;
+    final pageTop = topInset + (socketStatus == 'connected' ? 104.0 : 150.0);
+    final pageBottom = 64 + composerBottomPadding + iPhoneCommentClearance;
 
     return Stack(
       children: [
         Positioned.fill(
-          child: DecoratedBox(
-            decoration: const BoxDecoration(color: _audioRoomBackground),
-            child: SafeArea(
-              bottom: false,
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(
-                  16,
-                  6,
-                  16,
-                  (isCommenting ? 118 : 138) + composerBottomPadding,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildImmersiveAudioHeader(theme, room),
-                    if (socketStatus != 'connected') ...[
-                      const SizedBox(height: 8),
-                      RealtimeWarningBanner(
-                        status: socketStatus,
-                        scopeLabel: 'Live room',
-                        connectingMessage: 'Reconnecting to the broadcast...',
-                      ),
-                    ],
-                    const SizedBox(height: 14),
-                    const SizedBox(height: stageHeight + 12),
-                  ],
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.asset('assets/images/live_room_bg.png', fit: BoxFit.cover),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: _roomBackgroundGradient(_backgroundThemeName),
                 ),
               ),
-            ),
+            ],
           ),
         ),
         Positioned(
@@ -4175,30 +6327,141 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         ),
         Positioned(
           left: 16,
-          right: 70,
-          top: commentsTop,
-          bottom: 72 + composerBottomPadding + iPhoneCommentClearance,
-          child: _buildImmersiveComments(theme, condensed: isCommenting),
+          right: 16,
+          top: topInset + 4,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildImmersiveAudioHeader(theme, room),
+              const SizedBox(height: 6),
+              _buildImmersiveTopActions(theme),
+              if (socketStatus != 'connected') ...[
+                const SizedBox(height: 8),
+                RealtimeWarningBanner(
+                  status: socketStatus,
+                  scopeLabel: 'Live room',
+                  connectingMessage: 'Reconnecting to the broadcast...',
+                ),
+              ],
+            ],
+          ),
         ),
         Positioned(
           left: 16,
           right: 16,
-          top: stageTop,
-          height: stageHeight,
-          child: _buildImmersiveStage(theme),
-        ),
-        Positioned(
-          right: 16,
-          bottom: 124 + sideRailBottomPadding,
-          child: _buildImmersiveSideRail(theme),
+          top: pageTop,
+          bottom: pageBottom,
+          child: _buildAudioRoomPages(theme, isCommenting: isCommenting),
         ),
         Positioned(
           left: 16,
           right: 16,
           bottom: composerBottomPadding,
-          child: _buildImmersiveComposer(theme, socketStatus, isCommenting),
+          child: _shouldUseGuestLivePreview
+              ? _buildGuestPreviewDock(theme)
+              : _buildImmersiveComposer(theme, socketStatus, isCommenting),
         ),
+        if (_shouldUseGuestLivePreview && _guestPreviewExpired)
+          Positioned.fill(child: _buildGuestPreviewWall(theme)),
       ],
+    );
+  }
+
+  Widget _buildGuestPreviewDock(ThemeData theme) {
+    final remaining = _guestPreviewSecondsRemaining;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.headphones_rounded, color: Colors.white, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              remaining > 0
+                  ? 'Guest preview ends in ${remaining}s'
+                  : 'Create an account to keep listening',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          FilledButton(
+            onPressed: _openGuestPreviewSignup,
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+            ),
+            child: const Text('Sign up'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuestPreviewWall(ThemeData theme) {
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: 0.68),
+      child: Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 360),
+          margin: const EdgeInsets.all(22),
+          padding: const EdgeInsets.all(22),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            borderRadius: BorderRadius.circular(28),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.lock_open_rounded,
+                color: theme.colorScheme.primary,
+                size: 36,
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Keep listening on Talkflix',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Create a free account to continue listening, join the conversation, and come back to this room.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  height: 1.35,
+                ),
+              ),
+              const SizedBox(height: 18),
+              FilledButton(
+                onPressed: _openGuestPreviewSignup,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                ),
+                child: const Text('Create free account'),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _openGuestPreviewLogin,
+                child: const Text('I already have an account'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -4207,8 +6470,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     Map<String, dynamic> room,
   ) {
     final title = '${room['title'] ?? 'Broadcast'}';
-    final language = '${room['lang'] ?? _language}';
-    final secondary = room['lang2']?.toString();
     final hostUserId = '${room['hostUserId'] ?? ''}';
     final hostIsMe = hostUserId.isNotEmpty && hostUserId == _meId;
     final hostCanBeFollowed = hostUserId.isNotEmpty && !hostIsMe;
@@ -4217,6 +6478,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         : (hostCanBeFollowed
               ? (_isFollowingHost ? 'Following' : 'Follow')
               : '');
+    final canOpenSettings =
+        _isHost || _liveRoomState.permissions.canModerateRoom;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -4224,17 +6487,54 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         Row(
           children: [
             Expanded(
-              child: _AutoScrollingTitle(
-                text: title,
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.3,
-                  fontSize: 20,
+              child: GestureDetector(
+                onTap: canOpenSettings ? _openRoomSettingsScreen : null,
+                child: Row(
+                  children: [
+                    if (_roomIsPrivate) ...[
+                      Container(
+                        width: 26,
+                        height: 26,
+                        margin: const EdgeInsets.only(right: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.24),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: const Icon(
+                          Icons.lock_rounded,
+                          color: Colors.white,
+                          size: 15,
+                        ),
+                      ),
+                    ],
+                    Expanded(
+                      child: _AutoScrollingTitle(
+                        text: title,
+                        style: theme.textTheme.headlineSmall?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3,
+                          fontSize: 20,
+                        ),
+                      ),
+                    ),
+                    if (canOpenSettings) ...[
+                      const SizedBox(width: 6),
+                      const Icon(
+                        Icons.edit_outlined,
+                        color: Colors.white70,
+                        size: 18,
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
-            if (hostCanBeFollowed) ...[
+            // Host sees a heart counter; audience sees the Follow button
+            if (hostIsMe) ...[
+              const SizedBox(width: 8),
+              _HeartCountPill(count: _heartCount),
+            ] else if (hostCanBeFollowed) ...[
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: _followingHostBusy || _isFollowingHost
@@ -4260,33 +6560,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 ),
               ),
             ],
-            const SizedBox(width: 10),
-            GestureDetector(
-              onTap: _openRoomMenu,
-              child: Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.2),
-                  shape: BoxShape.circle,
-                ),
-                alignment: Alignment.center,
-                child: const Icon(
-                  Icons.more_horiz_rounded,
-                  color: Colors.white,
-                  size: 24,
-                ),
+            if (!_shouldUseGuestLivePreview && !_roomUsesVideo) ...[
+              const SizedBox(width: 8),
+              _AudioHeaderIconButton(
+                icon: Icons.keyboard_arrow_down_rounded,
+                tooltip: 'Minimize room',
+                onTap: _minimizeAudioRoom,
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            _ImmersivePill(label: language, filled: false, leading: null),
-            if (secondary?.isNotEmpty == true) ...[
-              const SizedBox(width: 10),
-              _ImmersivePill(label: secondary!, filled: false, leading: null),
             ],
           ],
         ),
@@ -4294,57 +6574,241 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     );
   }
 
+  Widget _buildAudioRoomPages(ThemeData theme, {required bool isCommenting}) {
+    final poll = _currentLivePoll;
+    final pollId = '${poll?['id'] ?? ''}'.trim();
+    return Column(
+      children: [
+        _buildAudioPageIndicator(theme),
+        const SizedBox(height: 6),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 180),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          child: poll == null
+              ? const SizedBox.shrink(key: ValueKey<String>('no-live-poll'))
+              : _LivePollCard(
+                  key: ValueKey<String>('live-poll-$pollId'),
+                  poll: poll,
+                  selectedOptionId: _myPollVoteOptionId,
+                  onVote: _voteInLivePoll,
+                ),
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: PageView(
+            key: const PageStorageKey<String>('audio-room-pages'),
+            controller: _audioRoomPageController,
+            onPageChanged: (index) =>
+                setState(() => _audioRoomPageIndex = index),
+            children: [
+              _buildAudioStagePage(theme),
+              _buildAudioListenersPage(theme),
+              _buildAudioCommentsPage(theme, isCommenting: isCommenting),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAudioPageIndicator(ThemeData theme) {
+    const labels = ['Speakers', 'Audience', 'Comments'];
+    final listenerCount = _activeAudienceCount;
+    return SizedBox(
+      height: 34,
+      child: Row(
+        children: List.generate(labels.length, (index) {
+          final selected = _audioRoomPageIndex == index;
+          return Expanded(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () {
+                _audioRoomPageController.animateToPage(
+                  index,
+                  duration: const Duration(milliseconds: 240),
+                  curve: Curves.easeOutCubic,
+                );
+              },
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AnimatedDefaultTextStyle(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOut,
+                    style:
+                        theme.textTheme.labelLarge?.copyWith(
+                          color: selected
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.62),
+                          fontWeight: selected
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                        ) ??
+                        TextStyle(
+                          color: selected
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.62),
+                          fontWeight: selected
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                        ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(labels[index]),
+                        if (index == 1) ...[
+                          const SizedBox(width: 6),
+                          _ListenerCountBadge(count: listenerCount),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    height: 3,
+                    width: selected ? 42 : 18,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? _audioRoomAccent
+                          : Colors.white.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildAudioStagePage(ThemeData theme) {
+    return _buildImmersiveStage(theme);
+  }
+
+  Widget _buildAudioListenersPage(ThemeData theme) {
+    final listeners = _audienceMembers;
+    if (listeners.isEmpty) {
+      return const _AudioEmptyPage(
+        icon: Icons.groups_2_outlined,
+        title: 'No audience yet',
+        subtitle: 'Audience members will appear here as people join the room.',
+      );
+    }
+    return GridView.builder(
+      padding: const EdgeInsets.only(bottom: 12),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 150,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        childAspectRatio: 0.88,
+      ),
+      itemCount: listeners.length,
+      itemBuilder: (context, index) {
+        final listener = listeners[index];
+        final userId = '${listener['userId'] ?? ''}';
+        return _AudioParticipantTile(
+          name: '${listener['name'] ?? 'Audience member'}',
+          photoUrl: '${listener['photo'] ?? ''}',
+          roleLabel: _moderatorIds.contains(userId) ? 'Moderator' : 'Audience',
+          muted: false,
+          speaking: false,
+          onTap: userId.isEmpty ? null : () => _openProfile(userId),
+          onLongPress: userId.isEmpty
+              ? null
+              : () => _onParticipantLongPress(userId),
+        );
+      },
+    );
+  }
+
+  Widget _buildAudioCommentsPage(
+    ThemeData theme, {
+    required bool isCommenting,
+  }) {
+    if (_comments.isEmpty) {
+      return const _AudioEmptyPage(
+        icon: Icons.chat_bubble_outline_rounded,
+        title: 'No comments yet',
+        subtitle: 'Live comments will fill this screen as the room talks.',
+      );
+    }
+    return _buildImmersiveComments(theme, condensed: isCommenting);
+  }
+
   Widget _buildImmersiveStage(ThemeData theme) {
     final seats = _stageSlots;
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        const idealSeatWidth = 96.0;
-        final slotWidth = constraints.maxWidth / 4;
-        final seatScale = (slotWidth / idealSeatWidth)
-            .clamp(0.72, 1.0)
-            .toDouble();
-
-        return Row(
-          children: List<Widget>.generate(4, (index) {
-            final seat = seats[index];
-            final isHostSeat = index == 0;
-            final occupied = seat != null && seat['occupied'] != false;
-            final userId = occupied ? '${seat['userId'] ?? ''}' : '';
-            final isSelfSeat = occupied && userId == _meId;
-            final muted = occupied
-                ? (isSelfSeat ? !_localMicEnabled : seat['muted'] == true)
-                : false;
-            final label = occupied
-                ? '${seat['name'] ?? (isHostSeat ? 'Host' : 'Speaker')}'
-                : '';
-            return SizedBox(
-              width: slotWidth,
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: _ImmersiveSeat(
-                  number: index + 1,
-                  label: label,
-                  occupied: occupied,
-                  photoUrl: occupied ? '${seat['photo'] ?? ''}' : '',
-                  isHostSeat: isHostSeat,
-                  accentBadge: false,
-                  scale: seatScale,
-                  muted: muted,
-                  speaking:
-                      occupied && !muted && _activeSpeakers.contains(userId),
-                  onTap: occupied && userId.isNotEmpty
-                      ? () => _openProfile(userId)
-                      : null,
-                  onLongPress: occupied && userId.isNotEmpty
-                      ? () => _onParticipantLongPress(userId)
-                      : null,
-                ),
-              ),
-            );
-          }),
+        const columns = 3;
+        const rows = 4;
+        final spacing = constraints.maxHeight < 500 ? 8.0 : 10.0;
+        final availableHeight = constraints.maxHeight.isFinite
+            ? constraints.maxHeight
+            : 520.0;
+        final tileHeight = ((availableHeight - (rows - 1) * spacing) / rows)
+            .clamp(92.0, 148.0);
+        final tileWidth =
+            (constraints.maxWidth - (columns - 1) * spacing) / columns;
+        final aspectRatio = tileWidth / tileHeight;
+        return GridView.builder(
+          padding: EdgeInsets.zero,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            mainAxisSpacing: spacing,
+            crossAxisSpacing: spacing,
+            childAspectRatio: aspectRatio,
+          ),
+          itemCount: 12,
+          itemBuilder: (context, index) => _buildStageSeatTile(
+            index: index,
+            seat: index < seats.length ? seats[index] : null,
+          ),
         );
       },
+    );
+  }
+
+  Widget _buildStageSeatTile({
+    required int index,
+    required Map<String, dynamic>? seat,
+  }) {
+    final isHostSeat = index == 0;
+    final occupied = seat != null && seat['occupied'] != false;
+    final userId = occupied ? '${seat['userId'] ?? ''}' : '';
+    final isSelfSeat = occupied && userId == _meId;
+    final muted = occupied
+        ? (isSelfSeat ? !_localMicEnabled : seat['muted'] == true)
+        : false;
+    final label = occupied
+        ? '${seat['name'] ?? (isHostSeat ? 'Host' : 'Speaker')}'
+        : '';
+    final roleLabel = isHostSeat
+        ? 'Host'
+        : (_moderatorIds.contains(userId) ? 'Moderator' : 'Speaker');
+    return _ImmersiveSeat(
+      number: index + 1,
+      label: label,
+      occupied: occupied,
+      photoUrl: occupied ? '${seat['photo'] ?? ''}' : '',
+      isHostSeat: isHostSeat,
+      accentBadge: false,
+      muted: muted,
+      roleLabel: occupied ? roleLabel : '',
+      micEffect: _micEffectName,
+      speaking: occupied && !muted && _activeSpeakers.contains(userId),
+      compact: true,
+      onTap: occupied && userId.isNotEmpty ? () => _openProfile(userId) : null,
+      onLongPress: occupied && userId.isNotEmpty
+          ? () => _onParticipantLongPress(userId)
+          : null,
     );
   }
 
@@ -4366,76 +6830,127 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         final author = '${comment['author'] ?? 'User'}';
         final text = '${comment['text'] ?? ''}';
         final userId = '${comment['userId'] ?? ''}';
+        final hostUserId = _resolveHostUserId(_activeRoom ?? {});
+        final isHostComment =
+            userId.isNotEmpty && hostUserId.isNotEmpty && userId == hostUserId;
+        final roleLabel = '${comment['roleLabel'] ?? ''}'.trim().isNotEmpty
+            ? '${comment['roleLabel']}'
+            : isHostComment
+            ? 'Host'
+            : _moderatorIds.contains(userId)
+            ? 'Moderator'
+            : '';
+        final rawCommentTheme = '${comment['commentTheme'] ?? 'glass'}'
+            .trim()
+            .toLowerCase();
+        final commentTheme = _liveCommentThemes.contains(rawCommentTheme)
+            ? rawCommentTheme
+            : 'glass';
         return _ImmersiveCommentBubble(
           author: author,
           text: text,
           photoUrl: '${comment['photo'] ?? ''}',
           system: author == 'System',
+          roleLabel: roleLabel,
+          commentTheme: commentTheme,
           onAvatarTap: userId.isEmpty ? null : () => _openProfile(userId),
           onAvatarLongPress: userId.isEmpty
               ? null
               : () => _onParticipantLongPress(userId),
-          onLongPress: () => _copyLiveComment(text),
+          onLongPress: () =>
+              _openLiveCommentActions(author: author, text: text),
         );
       },
     );
   }
 
-  Widget _buildImmersiveSideRail(ThemeData theme) {
+  Widget _buildImmersiveTopActions(ThemeData theme) {
     final isHost = _isHost;
-    final audienceCount = _audienceMembers.length;
-    final audienceBadge = audienceCount > 99 ? '99+' : '$audienceCount';
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
+    final pendingJoinRequestBadge = isHost && _pendingJoinRequestCount > 0
+        ? _pendingJoinRequestCountLabel
+        : null;
+    final actions = <Widget>[
+      _SideRailButton(icon: Icons.share_outlined, onTap: _shareRoom),
+      _SideRailButton(
+        icon: (!isHost && !_amOnStage && _handRaised)
+            ? null
+            : (!isHost && _amOnStage)
+            ? Icons.keyboard_arrow_down_rounded
+            : Icons.front_hand_outlined,
+        iconWidget: (!isHost && !_amOnStage && _handRaised)
+            ? Image.asset(
+                'assets/images/icons/raise_hand_active.png',
+                color: Colors.white,
+                colorBlendMode: BlendMode.srcIn,
+              )
+            : null,
+        isActive: !isHost && !_amOnStage && _handRaised,
+        badgeLabel: pendingJoinRequestBadge,
+        onTap: isHost
+            ? _openJoinRequestsSheet
+            : (_amOnStage
+                  ? _leaveStage
+                  : (_handRaised ? _lowerHand : _raiseHand)),
+      ),
+      if (_isHost)
         _SideRailButton(
-          icon: Icons.groups_rounded,
-          badgeLabel: audienceCount > 0 ? audienceBadge : null,
-          onTap: _openAudienceSheet,
+          icon: Icons.campaign_outlined,
+          onTap: _openHostNoticeSheet,
         ),
-        const SizedBox(height: 14),
+      if (_isHost)
+        _SideRailButton(icon: Icons.poll_outlined, onTap: _openHostPollSheet),
+      if (_liveRoomState.permissions.canModerateRoom)
         _SideRailButton(
-          icon: isHost
-              ? (_pendingJoinRequestCount > 0
-                    ? Icons.pan_tool_alt_rounded
-                    : Icons.front_hand_outlined)
-              : (_amOnStage ? Icons.logout_rounded : Icons.front_hand_outlined),
-          isActive: !isHost && !_amOnStage && _handRaised,
-          badgeLabel: isHost && _pendingJoinRequestCount > 0
-              ? _pendingJoinRequestCountLabel
+          icon: Icons.admin_panel_settings_outlined,
+          onTap: _openModerationControlsSheet,
+        ),
+      if (_amOnStage)
+        _SideRailButton(
+          icon: _localMicEnabled
+              ? Icons.mic_none_rounded
+              : Icons.mic_off_rounded,
+          onTap: _canUseStageMic
+              ? () {
+                  unawaited(_toggleStageMute());
+                }
               : null,
-          onTap: isHost
-              ? _openJoinRequestsSheet
-              : (_amOnStage
-                    ? _leaveStage
-                    : (_handRaised ? _lowerHand : _raiseHand)),
         ),
-        if (_liveRoomState.permissions.canModerateRoom) ...[
-          const SizedBox(height: 14),
-          _SideRailButton(
-            icon: Icons.admin_panel_settings_outlined,
-            onTap: _openModerationControlsSheet,
-          ),
-        ],
-        if (_amOnStage) ...[
-          const SizedBox(height: 14),
-          _SideRailButton(
-            icon: _localMicEnabled
-                ? Icons.mic_none_rounded
-                : Icons.mic_off_rounded,
-            onTap: _canUseStageMic
-                ? () {
-                    unawaited(_toggleStageMute());
-                  }
-                : null,
-          ),
-        ],
-        const SizedBox(height: 14),
+      if (_roomUsesVideo && _amOnStage)
+        _SideRailButton(
+          icon: _localVideoEnabled
+              ? Icons.videocam_rounded
+              : Icons.videocam_off_rounded,
+          onTap: () {
+            unawaited(_toggleStageCamera());
+          },
+        ),
+      if (_roomUsesVideo && _amOnStage && _localVideoEnabled)
+        _SideRailButton(
+          icon: Icons.cameraswitch_outlined,
+          onTap: () {
+            unawaited(_switchStageCamera());
+          },
+        ),
+      if (!isHost)
         _SideRailButton(
           icon: Icons.favorite_rounded,
           onTap: () => _sendReaction('❤️'),
         ),
-      ],
+      _SideRailButton(
+        icon: _isHost ? Icons.stop_circle_outlined : Icons.logout_rounded,
+        isDestructive: true,
+        onTap: _leaveBroadcast,
+      ),
+    ];
+    return SizedBox(
+      height: 48,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        itemCount: actions.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        itemBuilder: (context, index) => actions[index],
+      ),
     );
   }
 
@@ -4451,7 +6966,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            padding: const EdgeInsets.fromLTRB(12, 7, 8, 7),
+            padding: const EdgeInsets.fromLTRB(12, 5, 8, 5),
             decoration: BoxDecoration(
               color: isCommenting
                   ? Colors.black.withValues(alpha: 0.34)
@@ -4468,10 +6983,11 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                     maxLines: isCommenting ? 4 : 1,
                     minLines: 1,
                     maxLength: 200,
-                    style: theme.textTheme.bodyLarge?.copyWith(
+                    style: theme.textTheme.bodyMedium?.copyWith(
                       color: Colors.white,
-                      fontSize: 15,
+                      fontSize: 13,
                     ),
+                    textAlignVertical: TextAlignVertical.top,
                     textInputAction: TextInputAction.send,
                     inputFormatters: [LengthLimitingTextInputFormatter(200)],
                     onSubmitted: (_) => _sendComment(),
@@ -4489,18 +7005,15 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                     ),
                   ),
                 ),
-                if (isCommenting) ...[
-                  _ComposerIconButton(
-                    icon: Icons.send_rounded,
-                    onTap: enabled ? _sendComment : null,
-                  ),
-                ] else ...[
-                  _ComposerDockButton(
-                    icon: Icons.card_giftcard_rounded,
-                    badgeLabel: null,
-                    onTap: () => _showPlaceholderAction('Gifts'),
-                  ),
-                ],
+                _ComposerDockButton(
+                  icon: Icons.palette_outlined,
+                  badgeLabel: null,
+                  onTap: _openRoomAppearanceSheet,
+                ),
+                _ComposerIconButton(
+                  icon: Icons.send_rounded,
+                  onTap: enabled ? _sendComment : null,
+                ),
               ],
             ),
           ),
@@ -4508,255 +7021,1336 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       ),
     );
   }
+}
 
-  Widget _buildStageGrid(ThemeData theme) {
-    final slots = _stageSlots;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(28),
+typedef _SaveRoomSettingsCallback =
+    Future<bool> Function({
+      required String title,
+      required String description,
+      required String language,
+      String? secondaryLanguage,
+    });
+
+typedef _ToggleModeratorCallback =
+    Future<bool> Function({required String userId, required bool isModerator});
+
+typedef _SaveRoomAppearanceCallback =
+    Future<bool> Function({required String backgroundTheme});
+
+enum _HostNoticeActionType { save, delete, send }
+
+class _HostNoticeAction {
+  const _HostNoticeAction(this.type, [this.text = '']);
+
+  final _HostNoticeActionType type;
+  final String text;
+}
+
+class _HostNoticeSheet extends StatefulWidget {
+  const _HostNoticeSheet({
+    required this.initialSavedText,
+    required this.hasSavedNotice,
+  });
+
+  final String initialSavedText;
+  final bool hasSavedNotice;
+
+  @override
+  State<_HostNoticeSheet> createState() => _HostNoticeSheetState();
+}
+
+class _HostNoticeSheetState extends State<_HostNoticeSheet> {
+  late final TextEditingController _savedController;
+  late final TextEditingController _oneTimeController;
+
+  @override
+  void initState() {
+    super.initState();
+    _savedController = TextEditingController(text: widget.initialSavedText);
+    _oneTimeController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _savedController.dispose();
+    _oneTimeController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final savedText = _savedController.text.trim();
+    final oneTimeText = _oneTimeController.text.trim();
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          0,
+          16,
+          MediaQuery.viewInsetsOf(context).bottom + 16,
+        ),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.88,
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(28),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Announcements',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Set a join notice for new members, or send a one-time notice to everyone currently in the room.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Saved join notice',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'New audience members see this first when they enter.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _savedController,
+                    maxLength: 360,
+                    minLines: 3,
+                    maxLines: 5,
+                    textAlignVertical: TextAlignVertical.top,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      hintText: 'Write the message new members must read',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: savedText.isEmpty
+                              ? null
+                              : () => Navigator.of(context).pop(
+                                  _HostNoticeAction(
+                                    _HostNoticeActionType.save,
+                                    savedText,
+                                  ),
+                                ),
+                          icon: const Icon(Icons.save_outlined),
+                          label: const Text('Save'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      OutlinedButton.icon(
+                        onPressed: widget.hasSavedNotice
+                            ? () => Navigator.of(context).pop(
+                                const _HostNoticeAction(
+                                  _HostNoticeActionType.delete,
+                                ),
+                              )
+                            : null,
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Delete'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
+                  Text(
+                    'One-time notice',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Shows now only. It is not saved for future joiners.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _oneTimeController,
+                    maxLength: 360,
+                    minLines: 3,
+                    maxLines: 5,
+                    textAlignVertical: TextAlignVertical.top,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      hintText: 'Write a live announcement for this moment',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: oneTimeText.isEmpty
+                        ? null
+                        : () => Navigator.of(context).pop(
+                            _HostNoticeAction(
+                              _HostNoticeActionType.send,
+                              oneTimeText,
+                            ),
+                          ),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                    icon: const Icon(Icons.campaign_outlined),
+                    label: const Text('Send now'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Stage',
-            style: theme.textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '1 host + 3 speakers. Listeners stay in the audience and can request the stage.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 14),
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: 4,
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 12,
-              childAspectRatio: 0.92,
-            ),
-            itemBuilder: (context, index) {
-              final slot = slots[index];
-              final isSelf = slot != null && '${slot['userId'] ?? ''}' == _meId;
-              final peerUserId = slot == null ? '' : '${slot['userId'] ?? ''}';
-              final renderer = isSelf
-                  ? _localRenderer
-                  : _remoteRenderers[peerUserId];
-              final role = slot == null
-                  ? (index == 0 ? 'Host' : 'Speaker')
-                  : '${slot['role'] ?? 'Speaker'}';
-              final connected = isSelf || renderer?.srcObject != null;
-              return _StageSeatCard(
-                name: slot == null
-                    ? (index == 0 ? 'Waiting for host' : 'Open speaker slot')
-                    : '${slot['name'] ?? 'Speaker'}',
-                role: role,
-                photoUrl: slot == null ? '' : '${slot['photo'] ?? ''}',
-                renderer: renderer,
-                isVideoRoom: _roomUsesVideo,
-                localVideoEnabled: isSelf ? _localVideoEnabled : true,
-                connected: connected,
-                muted: isSelf ? !_localMicEnabled : (slot?['muted'] == true),
-                statusLabel: slot == null
-                    ? null
-                    : (isSelf ? 'live' : _peerStates[peerUserId] ?? 'live'),
-                highlighted: isSelf,
-                empty: slot == null,
-                onAvatarTap: slot == null || peerUserId.isEmpty
-                    ? null
-                    : () => _openProfile(peerUserId),
-                onLongPress: slot == null || peerUserId.isEmpty
-                    ? null
-                    : () => _onParticipantLongPress(peerUserId),
-              );
-            },
-          ),
-        ],
+    );
+  }
+}
+
+class _ParticipantReportResult {
+  const _ParticipantReportResult({
+    required this.reason,
+    required this.details,
+    required this.proofs,
+  });
+
+  final String reason;
+  final String details;
+  final List<_LiveReportProof> proofs;
+}
+
+class _LiveReportProof {
+  const _LiveReportProof({
+    required this.dataUrl,
+    required this.bytes,
+    required this.name,
+    required this.mimeType,
+  });
+
+  final String dataUrl;
+  final Uint8List bytes;
+  final String name;
+  final String mimeType;
+}
+
+class _ParticipantReportSheet extends StatefulWidget {
+  const _ParticipantReportSheet({
+    required this.displayName,
+    required this.permissionService,
+  });
+
+  final String displayName;
+  final MediaPermissionService permissionService;
+
+  @override
+  State<_ParticipantReportSheet> createState() =>
+      _ParticipantReportSheetState();
+}
+
+class _ParticipantReportSheetState extends State<_ParticipantReportSheet> {
+  final _reasonController = TextEditingController();
+  final _detailsController = TextEditingController();
+  final _imagePicker = ImagePicker();
+  final List<_LiveReportProof> _proofs = <_LiveReportProof>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _reasonController.text = 'Harassment or abuse';
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    _detailsController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _addProof(ImageSource source) async {
+    final allowed = source == ImageSource.camera
+        ? await widget.permissionService.ensureCameraAndMicrophone()
+        : await widget.permissionService.ensurePhotos();
+    if (!allowed) {
+      _showSnack('Photo permission is required for report proof.');
+      return;
+    }
+    final file = await _imagePicker.pickImage(
+      source: source,
+      maxWidth: 1400,
+      imageQuality: 72,
+    );
+    if (file == null) return;
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) return;
+    if (bytes.length > 1500000) {
+      _showSnack('Proof photo is too large. Choose a smaller image.');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _proofs.add(
+        _LiveReportProof(
+          dataUrl: bytesToDataUrl(bytes, file.mimeType ?? 'image/jpeg'),
+          bytes: bytes,
+          name: file.name,
+          mimeType: file.mimeType ?? 'image/jpeg',
+        ),
+      );
+    });
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _submit() {
+    final reason = _reasonController.text.trim();
+    final details = _detailsController.text.trim();
+    if (reason.isEmpty) {
+      _showSnack('Choose a report reason.');
+      return;
+    }
+    if (_proofs.isEmpty) {
+      _showSnack('Add at least one proof photo.');
+      return;
+    }
+    Navigator.of(context).pop(
+      _ParticipantReportResult(
+        reason: reason,
+        details: details,
+        proofs: List<_LiveReportProof>.unmodifiable(_proofs),
       ),
     );
   }
 
-  Widget _buildRoomControls(ThemeData theme) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            _amOnStage ? 'Stage controls' : 'Audience controls',
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w800,
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          0,
+          16,
+          MediaQuery.viewInsetsOf(context).bottom + 16,
+        ),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.88,
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(28),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Report ${widget.displayName}',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Reports require at least one proof photo so moderators can review what happened.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    initialValue: _reasonController.text,
+                    decoration: const InputDecoration(labelText: 'Reason'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'Harassment or abuse',
+                        child: Text('Harassment or abuse'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Sexual content',
+                        child: Text('Sexual content'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Hate or discrimination',
+                        child: Text('Hate or discrimination'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Scam or spam',
+                        child: Text('Scam or spam'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Underage safety concern',
+                        child: Text('Underage safety concern'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Other safety concern',
+                        child: Text('Other safety concern'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) _reasonController.text = value;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _detailsController,
+                    minLines: 3,
+                    maxLines: 5,
+                    maxLength: 300,
+                    textAlignVertical: TextAlignVertical.top,
+                    decoration: const InputDecoration(
+                      labelText: 'What happened?',
+                      hintText: 'Describe the violation or abuse.',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _proofs.length >= 3
+                              ? null
+                              : () => _addProof(ImageSource.camera),
+                          icon: const Icon(Icons.photo_camera_outlined),
+                          label: const Text('Camera'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _proofs.length >= 3
+                              ? null
+                              : () => _addProof(ImageSource.gallery),
+                          icon: const Icon(Icons.photo_library_outlined),
+                          label: const Text('Gallery'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (_proofs.isEmpty)
+                    Text(
+                      'At least one proof photo is required.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.error,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    )
+                  else
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        for (var i = 0; i < _proofs.length; i += 1)
+                          Stack(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(14),
+                                child: Image.memory(
+                                  _proofs[i].bytes,
+                                  width: 72,
+                                  height: 72,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              Positioned(
+                                top: 2,
+                                right: 2,
+                                child: GestureDetector(
+                                  onTap: () =>
+                                      setState(() => _proofs.removeAt(i)),
+                                  child: const CircleAvatar(
+                                    radius: 11,
+                                    backgroundColor: Colors.black87,
+                                    child: Icon(
+                                      Icons.close,
+                                      size: 14,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  const SizedBox(height: 18),
+                  FilledButton.icon(
+                    onPressed: _submit,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                    icon: const Icon(Icons.report_outlined),
+                    label: const Text('Submit report'),
+                  ),
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveRoomSettingsScreen extends StatefulWidget {
+  const _LiveRoomSettingsScreen({
+    required this.initialTitle,
+    required this.initialDescription,
+    required this.initialLanguage,
+    required this.initialSecondaryLanguage,
+    required this.isPrivate,
+    required this.canEdit,
+    required this.participants,
+    required this.moderatorIds,
+    required this.onSave,
+    required this.onToggleModerator,
+  });
+
+  final String initialTitle;
+  final String initialDescription;
+  final String initialLanguage;
+  final String? initialSecondaryLanguage;
+  final bool isPrivate;
+  final bool canEdit;
+  final List<Map<String, dynamic>> participants;
+  final Set<String> moderatorIds;
+  final _SaveRoomSettingsCallback onSave;
+  final _ToggleModeratorCallback? onToggleModerator;
+
+  @override
+  State<_LiveRoomSettingsScreen> createState() =>
+      _LiveRoomSettingsScreenState();
+}
+
+class _LiveRoomSettingsScreenState extends State<_LiveRoomSettingsScreen> {
+  late final TextEditingController _titleController;
+  late final TextEditingController _descriptionController;
+  late String _language;
+  String? _secondaryLanguage;
+  late Set<String> _moderatorIds;
+  final Set<String> _moderatorBusyIds = <String>{};
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleController = TextEditingController(text: widget.initialTitle);
+    _descriptionController = TextEditingController(
+      text: widget.initialDescription,
+    );
+    _language = widget.initialLanguage;
+    _secondaryLanguage = widget.initialSecondaryLanguage;
+    _moderatorIds = {...widget.moderatorIds};
+  }
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _descriptionController.dispose();
+    super.dispose();
+  }
+
+  Future<String?> _pickLanguage({
+    required String title,
+    String? initialValue,
+    bool allowClear = false,
+  }) async {
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final theme = Theme.of(context);
+        return SafeArea(
+          child: Column(
             children: [
-              if (_amOnStage)
-                _ControlChip(
-                  icon: _localMicEnabled ? Icons.mic : Icons.mic_off,
-                  label: _localMicEnabled ? 'Mute mic' : 'Unmute mic',
-                  onTap: _toggleStageMute,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    if (allowClear)
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(''),
+                        child: const Text('Clear'),
+                      ),
+                  ],
                 ),
-              if (_amOnStage && _roomUsesVideo)
-                _ControlChip(
-                  icon: _localVideoEnabled
-                      ? Icons.videocam
-                      : Icons.videocam_off,
-                  label: _localVideoEnabled ? 'Stop camera' : 'Start camera',
-                  onTap: _toggleStageCamera,
+              ),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: languageOptions.length,
+                  itemBuilder: (context, index) {
+                    final option = languageOptions[index];
+                    final selected = option == initialValue;
+                    return ListTile(
+                      title: Text(option),
+                      trailing: selected
+                          ? const Icon(Icons.check_rounded)
+                          : null,
+                      onTap: () => Navigator.of(context).pop(option),
+                    );
+                  },
                 ),
-              if (_amOnStage && _roomUsesVideo && _localVideoEnabled)
-                _ControlChip(
-                  icon: Icons.cameraswitch_outlined,
-                  label: 'Switch camera',
-                  onTap: _switchStageCamera,
-                ),
-              if (!_isHost)
-                _ControlChip(
-                  icon: _amOnStage
-                      ? Icons.logout_rounded
-                      : (_handRaised
-                            ? Icons.pan_tool_alt
-                            : Icons.record_voice_over),
-                  label: _amOnStage
-                      ? 'Leave stage'
-                      : _handRaised
-                      ? 'Requested'
-                      : 'Request stage',
-                  onTap: _amOnStage
-                      ? _leaveStage
-                      : (_handRaised ? _lowerHand : _raiseHand),
-                ),
-              if (_isHost)
-                _ControlChip(
-                  icon: _pendingJoinRequestCount > 0
-                      ? Icons.pan_tool_alt_rounded
-                      : Icons.front_hand_outlined,
-                  label: _pendingJoinRequestCount > 0
-                      ? 'Raised hands ($_pendingJoinRequestCountLabel)'
-                      : 'Raised hands',
-                  onTap: _openJoinRequestsSheet,
-                ),
-              _ControlChip(
-                icon: _isHost ? Icons.stop_circle_outlined : Icons.logout,
-                label: _isHost ? 'End room' : 'Leave room',
-                destructive: true,
-                onTap: _leaveBroadcast,
               ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildComments(ThemeData theme) {
-    if (_comments.isEmpty) {
-      return Container(
-        width: double.infinity,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surface,
-          borderRadius: BorderRadius.circular(24),
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          'Comments will appear here as the room comes alive.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-      );
+  Future<void> _handleSave() async {
+    final title = _titleController.text.trim();
+    if (title.isEmpty || _saving) return;
+    setState(() => _saving = true);
+    final saved = await widget.onSave(
+      title: title,
+      description: _descriptionController.text.trim(),
+      language: _language,
+      secondaryLanguage: _secondaryLanguage?.trim().isEmpty ?? true
+          ? null
+          : _secondaryLanguage?.trim(),
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (saved) {
+      Navigator.of(context).pop();
     }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
-      ),
-      child: ListView.separated(
-        padding: const EdgeInsets.all(14),
-        itemBuilder: (context, index) {
-          final comment = _comments[index];
-          final text = '${comment['text'] ?? ''}';
-          final userId = '${comment['userId'] ?? ''}';
-          return _CommentTile(
-            author: '${comment['author'] ?? 'User'}',
-            text: text,
-            photoUrl: '${comment['photo'] ?? ''}',
-            system: '${comment['author'] ?? ''}' == 'System',
-            mine: '${comment['userId'] ?? ''}' == _meId,
-            onAvatarTap: userId.isEmpty ? null : () => _openProfile(userId),
-            onAvatarLongPress: userId.isEmpty
-                ? null
-                : () => _onParticipantLongPress(userId),
-            onLongPress: () => _copyLiveComment(text),
-          );
-        },
-        separatorBuilder: (_, _) => const SizedBox(height: 10),
-        itemCount: _comments.length,
-      ),
-    );
   }
 
-  Widget _buildCommentComposer(ThemeData theme, String socketStatus) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surface,
-          borderRadius: BorderRadius.circular(24),
-        ),
-        child: Row(
+  Future<void> _toggleModerator(
+    String userId, {
+    required bool nextValue,
+  }) async {
+    final callback = widget.onToggleModerator;
+    if (callback == null || _moderatorBusyIds.contains(userId)) return;
+    setState(() => _moderatorBusyIds.add(userId));
+    final success = await callback(userId: userId, isModerator: nextValue);
+    if (!mounted) return;
+    setState(() {
+      _moderatorBusyIds.remove(userId);
+      if (success) {
+        if (nextValue) {
+          _moderatorIds.add(userId);
+        } else {
+          _moderatorIds.remove(userId);
+        }
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final canEdit = widget.canEdit;
+    final participants = widget.participants;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: TextField(
-                controller: _commentController,
-                enabled: socketStatus == 'connected',
-                maxLines: 4,
-                minLines: 1,
-                maxLength: 200,
-                textInputAction: TextInputAction.send,
-                inputFormatters: [LengthLimitingTextInputFormatter(200)],
-                onSubmitted: (_) => _sendComment(),
-                decoration: const InputDecoration(
-                  hintText: 'Comment...',
-                  border: InputBorder.none,
-                  isDense: true,
-                  counterText: '',
-                ),
+            if (widget.isPrivate) ...[
+              const Icon(Icons.lock_rounded, size: 18),
+              const SizedBox(width: 6),
+            ],
+            const Text('Room settings'),
+          ],
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLowest,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: _titleController,
+                    enabled: canEdit,
+                    maxLength: 55,
+                    decoration: const InputDecoration(labelText: 'Title'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _descriptionController,
+                    enabled: canEdit,
+                    maxLength: 160,
+                    minLines: 3,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: 'Description',
+                      hintText: 'Tell people what this room is about',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    enabled: canEdit,
+                    leading: const Icon(Icons.language_rounded),
+                    title: const Text('Primary language'),
+                    subtitle: Text(_language),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: !canEdit
+                        ? null
+                        : () async {
+                            final selected = await _pickLanguage(
+                              title: 'Primary language',
+                              initialValue: _language,
+                            );
+                            if (selected != null && mounted) {
+                              setState(() => _language = selected);
+                            }
+                          },
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    enabled: canEdit,
+                    leading: const Icon(Icons.translate_rounded),
+                    title: const Text('Second language'),
+                    subtitle: Text(_secondaryLanguage ?? 'Optional'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_secondaryLanguage != null && canEdit)
+                          IconButton(
+                            onPressed: () =>
+                                setState(() => _secondaryLanguage = null),
+                            icon: const Icon(Icons.close_rounded),
+                          ),
+                        const Icon(Icons.chevron_right_rounded),
+                      ],
+                    ),
+                    onTap: !canEdit
+                        ? null
+                        : () async {
+                            final selected = await _pickLanguage(
+                              title: 'Second language',
+                              initialValue: _secondaryLanguage,
+                              allowClear: true,
+                            );
+                            if (selected != null && mounted) {
+                              setState(() {
+                                _secondaryLanguage = selected.trim().isEmpty
+                                    ? null
+                                    : selected;
+                              });
+                            }
+                          },
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: socketStatus == 'connected' ? _sendComment : null,
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(54, 54),
-                padding: EdgeInsets.zero,
-                shape: const CircleBorder(),
+            const SizedBox(height: 16),
+            Text(
+              'Moderators',
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w800,
               ),
-              child: const Icon(Icons.arrow_upward_rounded),
+            ),
+            const SizedBox(height: 8),
+            if (_moderatorIds.isEmpty)
+              Text(
+                'No moderators yet.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              )
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: participants
+                    .where(
+                      (participant) => _moderatorIds.contains(
+                        '${participant['userId'] ?? ''}',
+                      ),
+                    )
+                    .map(
+                      (participant) => Chip(
+                        avatar: CircleAvatar(
+                          backgroundImage:
+                              '${participant['photo'] ?? ''}'.trim().isEmpty
+                              ? null
+                              : NetworkImage('${participant['photo'] ?? ''}'),
+                          child: '${participant['photo'] ?? ''}'.trim().isEmpty
+                              ? Text(
+                                  ('${participant['name'] ?? 'U'}')
+                                      .trim()
+                                      .characters
+                                      .first
+                                      .toUpperCase(),
+                                )
+                              : null,
+                        ),
+                        label: Text('${participant['name'] ?? 'Moderator'}'),
+                      ),
+                    )
+                    .toList(),
+              ),
+            const SizedBox(height: 12),
+            Container(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLowest,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: participants.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        'No participants are available for moderator access yet.',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : Column(
+                      children: [
+                        for (var i = 0; i < participants.length; i++) ...[
+                          if (i > 0)
+                            Divider(
+                              height: 1,
+                              indent: 16,
+                              endIndent: 16,
+                              color: theme.colorScheme.outlineVariant
+                                  .withValues(alpha: 0.45),
+                            ),
+                          SwitchListTile.adaptive(
+                            value: _moderatorIds.contains(
+                              '${participants[i]['userId'] ?? ''}',
+                            ),
+                            onChanged:
+                                !canEdit || widget.onToggleModerator == null
+                                ? null
+                                : (nextValue) => _toggleModerator(
+                                    '${participants[i]['userId'] ?? ''}',
+                                    nextValue: nextValue,
+                                  ),
+                            secondary: CircleAvatar(
+                              backgroundImage:
+                                  '${participants[i]['photo'] ?? ''}'
+                                      .trim()
+                                      .isEmpty
+                                  ? null
+                                  : NetworkImage(
+                                      '${participants[i]['photo'] ?? ''}',
+                                    ),
+                              child:
+                                  '${participants[i]['photo'] ?? ''}'
+                                      .trim()
+                                      .isEmpty
+                                  ? Text(
+                                      ('${participants[i]['name'] ?? 'U'}')
+                                          .trim()
+                                          .characters
+                                          .first
+                                          .toUpperCase(),
+                                    )
+                                  : null,
+                            ),
+                            title: Text('${participants[i]['name'] ?? 'User'}'),
+                            subtitle: Text(
+                              '${participants[i]['roomRole'] ?? 'listener'}'
+                                  .toString()
+                                  .replaceAll('_', ' '),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
             ),
           ],
         ),
       ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+          child: FilledButton(
+            onPressed: canEdit
+                ? (_saving ? null : _handleSave)
+                : () => Navigator.of(context).pop(),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(52),
+            ),
+            child: Text(
+              _saving ? 'Saving...' : (canEdit ? 'Save changes' : 'Done'),
+            ),
+          ),
+        ),
+      ),
     );
   }
+}
+
+class _LiveRoomAppearanceSheet extends StatefulWidget {
+  const _LiveRoomAppearanceSheet({
+    required this.initialBackgroundTheme,
+    required this.initialMicEffect,
+    required this.initialCommentTheme,
+    required this.canEditBackground,
+    required this.onSave,
+    required this.onSaveMicEffect,
+    required this.onSaveCommentTheme,
+  });
+
+  final String initialBackgroundTheme;
+  final String initialMicEffect;
+  final String initialCommentTheme;
+  final bool canEditBackground;
+  final _SaveRoomAppearanceCallback onSave;
+  final Future<void> Function(String value) onSaveMicEffect;
+  final Future<void> Function(String value) onSaveCommentTheme;
+
+  @override
+  State<_LiveRoomAppearanceSheet> createState() =>
+      _LiveRoomAppearanceSheetState();
+}
+
+class _LiveRoomAppearanceSheetState extends State<_LiveRoomAppearanceSheet> {
+  late String _backgroundTheme;
+  late String _micEffect;
+  late String _commentTheme;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _backgroundTheme = widget.initialBackgroundTheme;
+    _micEffect = widget.initialMicEffect;
+    _commentTheme = widget.initialCommentTheme;
+  }
+
+  Future<void> _handleSave() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    final saved = widget.canEditBackground
+        ? await widget.onSave(backgroundTheme: _backgroundTheme)
+        : true;
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (saved) {
+      await widget.onSaveMicEffect(_micEffect);
+      await widget.onSaveCommentTheme(_commentTheme);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final previewBackground = _roomBackgroundGradient(_backgroundTheme);
+    final commentPalette = _commentThemePalette(_commentTheme);
+    final viewport = MediaQuery.sizeOf(context);
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+    final maxSheetHeight = viewport.height * 0.88;
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, bottomInset + 16),
+        child: Container(
+          constraints: BoxConstraints(maxHeight: maxSheetHeight),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            borderRadius: BorderRadius.circular(28),
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Room theme',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (widget.canEditBackground) ...[
+                  Container(
+                    height: 170,
+                    decoration: BoxDecoration(
+                      gradient: previewBackground,
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Align(
+                        alignment: Alignment.bottomLeft,
+                        child: Container(
+                          constraints: const BoxConstraints(maxWidth: 250),
+                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.32),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.16),
+                            ),
+                          ),
+                          child: Text(
+                            'Room background preview',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                Center(
+                  child: _PulsingRing(
+                    diameter: 66,
+                    effect: _micEffect,
+                    child: Container(
+                      width: 54,
+                      height: 54,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withValues(alpha: 0.16),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.25),
+                          width: 1.4,
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.mic_rounded,
+                        color: Colors.white,
+                        size: 26,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Center(
+                  child: Text(
+                    _micEffectLabel(_micEffect),
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                if (widget.canEditBackground) ...[
+                  Text(
+                    'Background',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _SegmentedPillBar(
+                    options: const ['gold', 'red', 'blue', 'black'],
+                    selected: _backgroundTheme,
+                    onChanged: (value) =>
+                        setState(() => _backgroundTheme = value),
+                    labelBuilder: _backgroundThemeLabel,
+                  ),
+                  const SizedBox(height: 18),
+                ],
+                Text(
+                  'Mic effect',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Applies only to your own mic animation.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _SegmentedPillBar(
+                  options: const ['pulse', 'halo', 'echo', 'spotlight'],
+                  selected: _micEffect,
+                  onChanged: (value) => setState(() => _micEffect = value),
+                  labelBuilder: _micEffectLabel,
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  'Comment bubble',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerLowest,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 260),
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                      decoration: BoxDecoration(
+                        color: commentPalette.bubbleColor,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: commentPalette.borderColor),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: commentPalette.chipColor,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              'You',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: commentPalette.chipTextColor,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Your comments will use this bubble style.',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: commentPalette.textColor,
+                              height: 1.3,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _SegmentedPillBar(
+                  options: const ['glass', 'soft', 'aqua', 'berry', 'mint'],
+                  selected: _commentTheme,
+                  onChanged: (value) => setState(() => _commentTheme = value),
+                  labelBuilder: _commentThemeLabel,
+                ),
+                const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: _saving ? null : _handleSave,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
+                  ),
+                  child: Text(_saving ? 'Saving...' : 'Apply theme'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+LinearGradient _roomBackgroundGradient(String themeName) {
+  switch (themeName) {
+    case 'black':
+      return const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xF2000000), Color(0xF2131316), Color(0xFF000000)],
+      );
+    case 'red':
+      return const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xCCE50914), Color(0xCC7A0010), Color(0xE6111113)],
+      );
+    case 'blue':
+      return const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xCC2D8CFF), Color(0xCC1847A8), Color(0xE6101524)],
+      );
+    case 'gold':
+    default:
+      return const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xB87C4C00), Color(0xBC3A2500), Color(0xE3111113)],
+      );
+  }
+}
+
+String _backgroundThemeLabel(String value) {
+  switch (value) {
+    case 'black':
+      return 'Black';
+    case 'red':
+      return 'Red';
+    case 'blue':
+      return 'Blue';
+    case 'gold':
+    default:
+      return 'Gold';
+  }
+}
+
+String _commentThemeLabel(String value) {
+  switch (value) {
+    case 'soft':
+      return 'Soft';
+    case 'aqua':
+      return 'Aqua';
+    case 'berry':
+      return 'Berry';
+    case 'mint':
+      return 'Mint';
+    case 'glass':
+    default:
+      return 'Glass';
+  }
+}
+
+String _micEffectLabel(String value) {
+  switch (value) {
+    case 'halo':
+      return 'Halo';
+    case 'echo':
+      return 'Echo';
+    case 'spotlight':
+      return 'Spot';
+    case 'pulse':
+    default:
+      return 'Pulse';
+  }
+}
+
+Color _micEffectColor(String value) {
+  switch (value) {
+    case 'halo':
+      return const Color(0xFF22D3EE);
+    case 'echo':
+      return const Color(0xFFA78BFA);
+    case 'spotlight':
+      return const Color(0xFFFFF2B8);
+    case 'pulse':
+    default:
+      return const Color(0xFFFFB84D);
+  }
+}
+
+_CommentThemePalette _commentThemePalette(String themeName) {
+  switch (themeName) {
+    case 'soft':
+      return const _CommentThemePalette(
+        bubbleColor: Color(0xFFF4E1D4),
+        textColor: Color(0xFF231512),
+        chipColor: Color(0xFFD58B66),
+        chipTextColor: Colors.white,
+        borderColor: Color(0x5CFFFFFF),
+      );
+    case 'aqua':
+      return const _CommentThemePalette(
+        bubbleColor: Color(0x6639D1FF),
+        textColor: Colors.white,
+        chipColor: Color(0xFF129BC1),
+        chipTextColor: Colors.white,
+        borderColor: Color(0x80B7F1FF),
+      );
+    case 'berry':
+      return const _CommentThemePalette(
+        bubbleColor: Color(0x66C03AFF),
+        textColor: Colors.white,
+        chipColor: Color(0xFF8F2BC4),
+        chipTextColor: Colors.white,
+        borderColor: Color(0x70F0C2FF),
+      );
+    case 'mint':
+      return const _CommentThemePalette(
+        bubbleColor: Color(0x664DE1B8),
+        textColor: Colors.white,
+        chipColor: Color(0xFF1AA37E),
+        chipTextColor: Colors.white,
+        borderColor: Color(0x7AE4FFF6),
+      );
+    case 'glass':
+    default:
+      return const _CommentThemePalette(
+        bubbleColor: Color(0x55000000),
+        textColor: Colors.white,
+        chipColor: Color(0xFF8B6200),
+        chipTextColor: Colors.white,
+        borderColor: Color(0x14FFFFFF),
+      );
+  }
+}
+
+class _CommentThemePalette {
+  const _CommentThemePalette({
+    required this.bubbleColor,
+    required this.textColor,
+    required this.chipColor,
+    required this.chipTextColor,
+    required this.borderColor,
+  });
+
+  final Color bubbleColor;
+  final Color textColor;
+  final Color chipColor;
+  final Color chipTextColor;
+  final Color borderColor;
 }
 
 class _SegmentedPillBar extends StatelessWidget {
@@ -4878,8 +8472,9 @@ class _SegmentedPillBar extends StatelessWidget {
   }
 }
 
-class _BroadcastCard extends StatelessWidget {
+class _BroadcastCard extends StatefulWidget {
   const _BroadcastCard({
+    required this.roomId,
     required this.title,
     required this.type,
     required this.language,
@@ -4887,14 +8482,13 @@ class _BroadcastCard extends StatelessWidget {
     required this.description,
     required this.host,
     required this.hostPhotoUrl,
-    required this.hostFlagCode,
     this.speakers = const [],
     required this.audienceCount,
     required this.attendeeCount,
-    required this.commentsCount,
     required this.onJoin,
   });
 
+  final String roomId;
   final String title;
   final String type;
   final String language;
@@ -4902,300 +8496,240 @@ class _BroadcastCard extends StatelessWidget {
   final String? description;
   final String host;
   final String hostPhotoUrl;
-  final String hostFlagCode;
   final List<Map<String, dynamic>> speakers;
   final int audienceCount;
   final int attendeeCount;
-  final int commentsCount;
   final VoidCallback? onJoin;
+
+  @override
+  State<_BroadcastCard> createState() => _BroadcastCardState();
+}
+
+class _BroadcastCardState extends State<_BroadcastCard>
+    with SingleTickerProviderStateMixin {
+  static const _glowPalette = <Color>[
+    Color(0xFF00E676),
+    Color(0xFF2196F3),
+    Color(0xFFFF2D95),
+    Color(0xFFFF1744),
+    Color(0xFF9C27B0),
+    Color(0xFFFF9800),
+    Color(0xFFFFD600),
+  ];
+
+  late final AnimationController _glowController;
+  late final Animation<double> _glowPulse;
+  late final Color _glowColor;
+
+  Color _colorForRoom(String roomKey) {
+    final key = roomKey.trim().isNotEmpty
+        ? roomKey.trim()
+        : '${widget.title}|${widget.host}|${widget.type}';
+    var hash = 0;
+    for (final unit in key.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+    return _glowPalette[hash % _glowPalette.length];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _glowColor = _colorForRoom(widget.roomId);
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1250),
+    )..repeat(reverse: true);
+    _glowPulse = CurvedAnimation(
+      parent: _glowController,
+      curve: Curves.easeInOutCubic,
+    );
+  }
+
+  @override
+  void dispose() {
+    _glowController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onJoin,
-        borderRadius: BorderRadius.circular(24),
-        child: Ink(
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+    final colors = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final cleanDescription = widget.description?.trim() ?? '';
+    final speakerCount = widget.speakers.isEmpty ? 1 : widget.speakers.length;
+    final fallbackPeopleCount = widget.audienceCount + speakerCount;
+    final peopleCount = math.max(widget.attendeeCount, fallbackPeopleCount);
+    final cardColor = colors.surfaceContainer;
+    return AnimatedBuilder(
+      animation: _glowPulse,
+      builder: (context, child) {
+        final pulse = _glowPulse.value;
+        final glowAlpha = isDark
+            ? 0.42 + (pulse * 0.34)
+            : 0.28 + (pulse * 0.24);
+        final borderAlpha = isDark
+            ? 0.72 + (pulse * 0.24)
+            : 0.5 + (pulse * 0.28);
+        final borderRadius = BorderRadius.circular(28);
+        return DecoratedBox(
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainer,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color: theme.colorScheme.outline.withValues(alpha: 0.14),
-            ),
-            gradient: LinearGradient(
-              colors: [
-                const Color(0xFF583EA4).withValues(alpha: 0.16),
-                const Color(0xFF583EA4).withValues(alpha: 0.06),
-              ],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
+            borderRadius: borderRadius,
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.12),
-                blurRadius: 22,
-                offset: const Offset(0, 10),
+                color: _glowColor.withValues(alpha: glowAlpha),
+                blurRadius: 30 + (pulse * 18),
+                spreadRadius: 1.2 + (pulse * 1.8),
+              ),
+              BoxShadow(
+                color: _glowColor.withValues(alpha: isDark ? 0.16 : 0.1),
+                blurRadius: 64 + (pulse * 14),
+                spreadRadius: 2.5 + (pulse * 1.5),
+              ),
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: isDark ? 0.28 : 0.08),
+                blurRadius: 24,
+                offset: const Offset(0, 12),
               ),
             ],
           ),
-          child: Column(
+          child: Material(
+            color: cardColor,
+            borderRadius: borderRadius,
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: widget.onJoin,
+              borderRadius: borderRadius,
+              child: Ink(
+                padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+                decoration: BoxDecoration(
+                  color: cardColor,
+                  borderRadius: borderRadius,
+                  border: Border.all(
+                    color: _glowColor.withValues(alpha: borderAlpha),
+                    width: 1.4 + (pulse * 0.8),
+                  ),
+                ),
+                child: child,
+              ),
+            ),
+          ),
+        );
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(
-                              0xFFFF3B30,
-                            ).withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const _LivePulseDot(),
-                              const SizedBox(width: 5),
-                              Text(
-                                'LIVE',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: const Color(0xFFFF3B30),
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 10,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        _RoomTagPill(label: language),
-                        if (secondaryLanguage != null &&
-                            secondaryLanguage!.isNotEmpty)
-                          _RoomTagPill(label: secondaryLanguage!),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _LiveRoomMenuButton(title: title),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w800,
-                  height: 1.05,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  _AvatarBubble(
-                    photoUrl: hostPhotoUrl,
-                    size: 36,
-                    fallback: host,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                host,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.labelLarge?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            if (hostFlagCode.isNotEmpty) ...[
-                              const SizedBox(width: 6),
-                              _HostFlagBadge(code: hostFlagCode),
-                            ],
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Row(
+              Expanded(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(
+                          0xFFFF3B30,
+                        ).withValues(alpha: isDark ? 0.18 : 0.12),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(
-                            Icons.headset_outlined,
-                            size: 16,
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: 4),
+                          const _LivePulseDot(),
+                          const SizedBox(width: 5),
                           Text(
-                            '$audienceCount',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w800,
+                            'LIVE',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: const Color(0xFFFF3B30),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 10,
+                              letterSpacing: 0.5,
                             ),
                           ),
                         ],
                       ),
-                      if (speakers.isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.record_voice_over_rounded,
-                              size: 14,
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${speakers.length}',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
+                    ),
+                    _RoomTagPill(label: widget.language),
+                    if (widget.secondaryLanguage != null)
+                      _RoomTagPill(label: widget.secondaryLanguage!),
+                  ],
+                ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StageSeatCard extends StatelessWidget {
-  const _StageSeatCard({
-    required this.name,
-    required this.role,
-    required this.photoUrl,
-    required this.renderer,
-    required this.isVideoRoom,
-    required this.localVideoEnabled,
-    required this.connected,
-    required this.muted,
-    required this.highlighted,
-    required this.empty,
-    this.statusLabel,
-    this.onAvatarTap,
-    this.onLongPress,
-  });
-
-  final String name;
-  final String role;
-  final String photoUrl;
-  final RTCVideoRenderer? renderer;
-  final bool isVideoRoom;
-  final bool localVideoEnabled;
-  final bool connected;
-  final bool muted;
-  final bool highlighted;
-  final bool empty;
-  final String? statusLabel;
-  final VoidCallback? onAvatarTap;
-  final VoidCallback? onLongPress;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final showVideo =
-        isVideoRoom && renderer != null && connected && localVideoEnabled;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(24),
-        border: highlighted
-            ? Border.all(color: theme.colorScheme.primary, width: 1.5)
-            : null,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: DecoratedBox(
-                decoration: BoxDecoration(color: theme.colorScheme.surface),
-                child: showVideo
-                    ? RTCVideoView(renderer!, mirror: highlighted)
-                    : Center(
-                        child: ParticipantActionTarget(
-                          onTap: onAvatarTap,
-                          onLongPress: onLongPress,
-                          child: _AvatarBubble(
-                            photoUrl: photoUrl,
-                            size: 72,
-                            fallback: name,
-                            icon: empty
-                                ? Icons.mic_none_outlined
-                                : Icons.person_outline,
-                          ),
-                        ),
-                      ),
-              ),
-            ),
           ),
           const SizedBox(height: 10),
-          ParticipantActionTarget(
-            onTap: onAvatarTap,
-            onLongPress: onLongPress,
-            child: Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w800,
-              ),
+          Text(
+            widget.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleLarge?.copyWith(
+              color: colors.onSurface,
+              fontWeight: FontWeight.w900,
+              height: 1.08,
+              fontSize: 22,
             ),
           ),
-          const SizedBox(height: 4),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 220),
-            switchInCurve: Curves.easeOutCubic,
-            switchOutCurve: Curves.easeInCubic,
-            child: Row(
-              key: ValueKey<String>('$role|${statusLabel ?? ''}|$muted'),
-              children: [
-                _TinyPill(label: role),
-                if (statusLabel != null) ...[
-                  const SizedBox(width: 6),
-                  _TinyPill(label: statusLabel!),
-                ],
-                if (muted) ...[
-                  const SizedBox(width: 6),
-                  const _TinyPill(label: 'Muted'),
-                ],
-              ],
+          if (cleanDescription.isNotEmpty) ...[
+            const SizedBox(height: 7),
+            Text(
+              cleanDescription,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: colors.onSurfaceVariant,
+                height: 1.25,
+              ),
             ),
+          ],
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              _AvatarBubble(
+                photoUrl: widget.hostPhotoUrl,
+                size: 56,
+                fallback: widget.host,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.host,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: colors.onSurface,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      widget.type == 'audio' ? 'Audio room' : 'Video room',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              _BroadcastMetric(
+                icon: Icons.groups_2_outlined,
+                value: compactCount(peopleCount),
+              ),
+            ],
           ),
         ],
       ),
@@ -5203,112 +8737,25 @@ class _StageSeatCard extends StatelessWidget {
   }
 }
 
-class _CommentTile extends StatelessWidget {
-  const _CommentTile({
-    required this.author,
-    required this.text,
-    required this.photoUrl,
-    required this.system,
-    required this.mine,
-    this.onAvatarTap,
-    this.onAvatarLongPress,
-    this.onLongPress,
-  });
+class _BroadcastMetric extends StatelessWidget {
+  const _BroadcastMetric({required this.icon, required this.value});
 
-  final String author;
-  final String text;
-  final String photoUrl;
-  final bool system;
-  final bool mine;
-  final VoidCallback? onAvatarTap;
-  final VoidCallback? onAvatarLongPress;
-  final VoidCallback? onLongPress;
+  final IconData icon;
+  final String value;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    if (system) {
-      return Center(
-        child: GestureDetector(
-          onLongPress: onLongPress,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: Text(
-              text,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        if (!mine) ...[
-          ParticipantActionTarget(
-            onTap: onAvatarTap,
-            onLongPress: onAvatarLongPress,
-            child: _AvatarBubble(
-              photoUrl: photoUrl,
-              size: 34,
-              fallback: author,
-            ),
-          ),
-          const SizedBox(width: 10),
-        ],
-        Expanded(
-          child: Column(
-            crossAxisAlignment: mine
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
-            children: [
-              if (!mine)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: ParticipantActionTarget(
-                    onTap: onAvatarTap,
-                    onLongPress: onAvatarLongPress,
-                    child: Text(
-                      author,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ),
-              GestureDetector(
-                onLongPress: onLongPress,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 11,
-                  ),
-                  decoration: BoxDecoration(
-                    color: mine
-                        ? theme.colorScheme.primary
-                        : theme.colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: Text(
-                    text,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: mine
-                          ? theme.colorScheme.onPrimary
-                          : theme.colorScheme.onSurface,
-                      height: 1.35,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+        Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+        const SizedBox(width: 4),
+        Text(
+          value,
+          style: theme.textTheme.labelLarge?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            fontWeight: FontWeight.w800,
           ),
         ),
       ],
@@ -5316,41 +8763,62 @@ class _CommentTile extends StatelessWidget {
   }
 }
 
-class _ImmersivePill extends StatelessWidget {
-  const _ImmersivePill({
-    required this.label,
-    required this.filled,
-    this.leading,
-  });
+class _RoomTagPill extends StatelessWidget {
+  const _RoomTagPill({required this.label});
 
   final String label;
-  final bool filled;
-  final String? leading;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: filled ? _LiveScreenState._audioRoomAccent : Colors.white12,
+        color: theme.colorScheme.primary.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(999),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (leading != null) ...[
-            Text(leading!, style: const TextStyle(fontSize: 15)),
-            const SizedBox(width: 6),
-          ],
-          Text(
-            label,
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              fontSize: 12,
-            ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.primary,
+          fontWeight: FontWeight.w800,
+          fontSize: 10,
+          letterSpacing: 0.3,
+        ),
+      ),
+    );
+  }
+}
+
+class _AudioHeaderIconButton extends StatelessWidget {
+  const _AudioHeaderIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(999),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(999),
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(icon, color: Colors.white, size: 24),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -5364,9 +8832,11 @@ class _ImmersiveSeat extends StatelessWidget {
     required this.photoUrl,
     required this.isHostSeat,
     required this.accentBadge,
-    this.scale = 1,
+    this.roleLabel = '',
     this.speaking = false,
     this.muted = false,
+    this.micEffect = 'pulse',
+    this.compact = false,
     this.onTap,
     this.onLongPress,
   });
@@ -5377,149 +8847,345 @@ class _ImmersiveSeat extends StatelessWidget {
   final String photoUrl;
   final bool isHostSeat;
   final bool accentBadge;
-  final double scale;
+  final String roleLabel;
   final bool speaking;
   final bool muted;
+  final String micEffect;
+  final bool compact;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
-    final seatWidth = 96.0 * scale;
-    final avatarOuter = 72.0 * scale;
-    final avatarInner = 68.0 * scale;
-    final badgeSize = 24.0 * scale;
-    final placeholderIconSize = 32.0 * scale;
-    final badgeBorder = 2.4 * scale;
-    final labelFontSize = 12.0 * scale;
-    final indexFontSize = 16.0 * scale;
-
-    final circle = Container(
-      width: seatWidth,
-      alignment: Alignment.topCenter,
+    final theme = Theme.of(context);
+    final effectColor = _micEffectColor(micEffect);
+    final card = Container(
+      padding: EdgeInsets.all(compact ? 6 : 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: occupied ? 0.22 : 0.14),
+        borderRadius: BorderRadius.circular(compact ? 18 : 22),
+        border: Border.all(
+          color: speaking
+              ? effectColor
+              : occupied
+              ? effectColor.withValues(alpha: 0.42)
+              : Colors.white.withValues(alpha: 0.12),
+          width: speaking ? 2.2 : 1,
+        ),
+        boxShadow: occupied
+            ? [
+                BoxShadow(
+                  color: effectColor.withValues(alpha: speaking ? 0.32 : 0.12),
+                  blurRadius: speaking ? 24 : 14,
+                  spreadRadius: speaking ? 1.4 : 0.2,
+                ),
+              ]
+            : null,
+      ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              if (speaking && occupied)
-                _PulsingRing(
-                  diameter: 80 * scale,
-                  child: Container(
-                    width: avatarOuter,
-                    height: avatarOuter,
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(compact ? 13 : 17),
+                  child: DecoratedBox(
                     decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.white12,
-                      border: Border.all(color: Colors.white24, width: 1.6),
+                      color: Colors.white.withValues(alpha: 0.11),
                     ),
-                    child: ClipOval(
-                      child: _AvatarBubble(
-                        photoUrl: photoUrl,
-                        size: avatarInner,
-                        fallback: label.isEmpty ? '$number' : label,
-                      ),
-                    ),
-                  ),
-                )
-              else
-                Container(
-                  width: avatarOuter,
-                  height: avatarOuter,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.white12,
-                    border: Border.all(color: Colors.white24, width: 1.6),
-                  ),
-                  child: occupied
-                      ? ClipOval(
-                          child: _AvatarBubble(
+                    child: occupied
+                        ? _SquareAvatar(
                             photoUrl: photoUrl,
-                            size: avatarInner,
                             fallback: label.isEmpty ? '$number' : label,
+                          )
+                        : Icon(
+                            Icons.record_voice_over_rounded,
+                            color: Colors.white.withValues(alpha: 0.82),
+                            size: compact ? 26 : 34,
                           ),
-                        )
-                      : Icon(
-                          Icons.record_voice_over_rounded,
-                          color: Colors.white,
-                          size: placeholderIconSize,
-                        ),
+                  ),
                 ),
-              if (accentBadge)
                 Positioned(
-                  left: -2,
-                  bottom: -2,
+                  left: 8,
+                  top: 8,
                   child: Container(
-                    width: badgeSize,
-                    height: badgeSize,
-                    decoration: BoxDecoration(
-                      color: _LiveScreenState._audioRoomAccent,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _LiveScreenState._audioRoomBackground,
-                        width: badgeBorder,
-                      ),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: compact ? 6 : 7,
+                      vertical: compact ? 2 : 3,
                     ),
-                    child: Icon(
-                      Icons.home_rounded,
-                      color: Colors.white,
-                      size: 13 * scale,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.38),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      occupied ? roleLabel : '$number',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: compact ? 8.5 : 9.5,
+                      ),
                     ),
                   ),
                 ),
-              if (occupied && muted)
-                Positioned(
-                  right: -2,
-                  top: -2,
-                  child: Container(
-                    width: badgeSize,
-                    height: badgeSize,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFB3261E),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _LiveScreenState._audioRoomBackground,
-                        width: badgeBorder,
+                if (occupied)
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Container(
+                      width: compact ? 24 : 28,
+                      height: compact ? 24 : 28,
+                      decoration: BoxDecoration(
+                        color: muted
+                            ? const Color(0xFFB3261E)
+                            : effectColor.withValues(alpha: 0.78),
+                        borderRadius: BorderRadius.circular(10),
+                        boxShadow: muted
+                            ? null
+                            : [
+                                BoxShadow(
+                                  color: effectColor.withValues(alpha: 0.38),
+                                  blurRadius: 12,
+                                  spreadRadius: 0.8,
+                                ),
+                              ],
+                      ),
+                      child: Icon(
+                        muted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                        color: Colors.white,
+                        size: compact ? 13 : 15,
                       ),
                     ),
-                    child: Icon(
-                      Icons.mic_off_rounded,
-                      color: Colors.white,
-                      size: 12 * scale,
-                    ),
                   ),
-                ),
-            ],
-          ),
-          SizedBox(height: 8 * scale),
-          if (label.isNotEmpty)
-            Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w500,
-                fontSize: labelFontSize,
-              ),
+              ],
             ),
+          ),
+          SizedBox(height: compact ? 4 : 7),
           Text(
-            '$number',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: Colors.white70,
-              fontWeight: FontWeight.w400,
-              fontSize: indexFontSize,
+            occupied && label.isNotEmpty ? label : 'Seat $number',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: compact ? 10.5 : 12,
             ),
           ),
         ],
       ),
     );
 
-    if (onTap == null && onLongPress == null) return circle;
-    return GestureDetector(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: circle,
+    if (onTap == null && onLongPress == null) return card;
+    return GestureDetector(onTap: onTap, onLongPress: onLongPress, child: card);
+  }
+}
+
+class _AudioParticipantTile extends StatelessWidget {
+  const _AudioParticipantTile({
+    required this.name,
+    required this.photoUrl,
+    required this.roleLabel,
+    required this.muted,
+    required this.speaking,
+    this.onTap,
+    this.onLongPress,
+  });
+
+  final String name;
+  final String photoUrl;
+  final String roleLabel;
+  final bool muted;
+  final bool speaking;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final card = Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: speaking
+              ? _LiveScreenState._audioRoomAccent
+              : Colors.white.withValues(alpha: 0.12),
+          width: speaking ? 2 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _SquareAvatar(photoUrl: photoUrl, fallback: name),
+                Positioned(
+                  left: 8,
+                  top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.38),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      roleLabel,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 9.5,
+                      ),
+                    ),
+                  ),
+                ),
+                if (muted)
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFB3261E),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.mic_off_rounded,
+                        color: Colors.white,
+                        size: 15,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null && onLongPress == null) return card;
+    return GestureDetector(onTap: onTap, onLongPress: onLongPress, child: card);
+  }
+}
+
+class _SquareAvatar extends StatelessWidget {
+  const _SquareAvatar({required this.photoUrl, required this.fallback});
+
+  final String photoUrl;
+  final String fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final initials = fallback.isEmpty
+        ? '?'
+        : fallback
+              .trim()
+              .split(RegExp(r'\s+'))
+              .take(2)
+              .map((part) => part.isEmpty ? '' : part[0])
+              .join();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(17),
+      child: Container(
+        color: Colors.white.withValues(alpha: 0.11),
+        alignment: Alignment.center,
+        child: photoUrl.trim().isEmpty
+            ? Text(
+                initials.toUpperCase(),
+                style: theme.textTheme.headlineMedium?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              )
+            : Image.network(
+                resolveMediaUrl(photoUrl),
+                fit: BoxFit.cover,
+                width: double.infinity,
+                height: double.infinity,
+                errorBuilder: (_, _, _) => Center(
+                  child: Text(
+                    initials.toUpperCase(),
+                    style: theme.textTheme.headlineMedium?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _AudioEmptyPage extends StatelessWidget {
+  const _AudioEmptyPage({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 340),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.22),
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: Colors.white, size: 34),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: Colors.white70,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -5530,6 +9196,8 @@ class _ImmersiveCommentBubble extends StatelessWidget {
     required this.text,
     required this.photoUrl,
     required this.system,
+    required this.commentTheme,
+    this.roleLabel = '',
     this.onAvatarTap,
     this.onAvatarLongPress,
     this.onLongPress,
@@ -5539,6 +9207,8 @@ class _ImmersiveCommentBubble extends StatelessWidget {
   final String text;
   final String photoUrl;
   final bool system;
+  final String commentTheme;
+  final String roleLabel;
   final VoidCallback? onAvatarTap;
   final VoidCallback? onAvatarLongPress;
   final VoidCallback? onLongPress;
@@ -5546,20 +9216,28 @@ class _ImmersiveCommentBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final palette = _commentThemePalette(commentTheme);
+    final bubbleColor = palette.bubbleColor;
+    final authorChipColor = palette.chipColor;
+    final bodyTextColor = palette.textColor;
+    final authorTextColor = palette.chipTextColor;
     final bubble = GestureDetector(
       onLongPress: onLongPress,
       child: Container(
         constraints: const BoxConstraints(maxWidth: 520),
         padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
         decoration: BoxDecoration(
-          color: _LiveScreenState._audioRoomBubble,
-          borderRadius: BorderRadius.circular(18),
+          color: bubbleColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: palette.borderColor),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -5567,25 +9245,47 @@ class _ImmersiveCommentBubble extends StatelessWidget {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: _LiveScreenState._audioRoomChip,
+                    color: authorChipColor,
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
                     system ? 'Notice' : author,
                     style: theme.textTheme.titleSmall?.copyWith(
-                      color: Colors.white,
+                      color: authorTextColor,
                       fontWeight: FontWeight.w700,
                       fontSize: 11,
                     ),
                   ),
                 ),
+                if (!system && roleLabel.trim().isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.18),
+                      ),
+                    ),
+                    child: Text(
+                      roleLabel,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: bodyTextColor,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ),
               ],
             ),
             const SizedBox(height: 6),
             Text(
               text,
               style: theme.textTheme.titleLarge?.copyWith(
-                color: Colors.white,
+                color: bodyTextColor,
                 height: 1.32,
                 fontWeight: FontWeight.w400,
                 fontSize: 13,
@@ -5637,16 +9337,26 @@ class _ImmersiveCommentBubble extends StatelessWidget {
 
 class _SideRailButton extends StatelessWidget {
   const _SideRailButton({
-    required this.icon,
+    this.icon,
+    this.iconWidget,
     this.onTap,
     this.badgeLabel,
     this.isActive = false,
-  });
+    this.isDestructive = false,
+  }) : assert(
+         icon != null || iconWidget != null,
+         '_SideRailButton requires icon or iconWidget',
+       );
 
-  final IconData icon;
+  final IconData? icon;
+
+  /// Optional custom widget rendered instead of [icon]. Wrap in [Opacity] for
+  /// disabled appearance — the button handles it automatically.
+  final Widget? iconWidget;
   final VoidCallback? onTap;
   final String? badgeLabel;
   final bool isActive;
+  final bool isDestructive;
 
   @override
   Widget build(BuildContext context) {
@@ -5675,12 +9385,18 @@ class _SideRailButton extends StatelessWidget {
                 width: 48,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: isActive
+                  color: isDestructive
+                      ? theme.colorScheme.error.withValues(alpha: 0.78)
+                      : isActive
                       ? _LiveScreenState._audioRoomAccent
                       : Colors.white12,
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: isActive ? Colors.white24 : Colors.white10,
+                    color: isDestructive
+                        ? theme.colorScheme.error.withValues(alpha: 0.42)
+                        : isActive
+                        ? Colors.white24
+                        : Colors.white10,
                   ),
                   boxShadow: isActive
                       ? [
@@ -5695,11 +9411,20 @@ class _SideRailButton extends StatelessWidget {
                       : null,
                 ),
                 alignment: Alignment.center,
-                child: Icon(
-                  icon,
-                  color: enabled ? Colors.white : Colors.white54,
-                  size: 22,
-                ),
+                child: iconWidget != null
+                    ? Opacity(
+                        opacity: enabled ? 1.0 : 0.38,
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: iconWidget,
+                        ),
+                      )
+                    : Icon(
+                        icon!,
+                        color: enabled ? Colors.white : Colors.white54,
+                        size: 22,
+                      ),
               ),
             ),
           ),
@@ -5713,10 +9438,6 @@ class _SideRailButton extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: theme.colorScheme.primary,
                   borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
-                    color: _LiveScreenState._audioRoomBackground,
-                    width: 1.2,
-                  ),
                 ),
                 alignment: Alignment.center,
                 child: Text(
@@ -5857,43 +9578,252 @@ class _JoinRequestRow extends StatelessWidget {
   }
 }
 
-class _MenuActionTile extends StatelessWidget {
-  const _MenuActionTile({
+class _ShareRoomActionTile extends StatelessWidget {
+  const _ShareRoomActionTile({
     required this.icon,
-    required this.label,
+    required this.title,
+    required this.subtitle,
     required this.onTap,
-    this.destructive = false,
   });
 
   final IconData icon;
-  final String label;
+  final String title;
+  final String subtitle;
   final VoidCallback onTap;
-  final bool destructive;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = destructive
-        ? theme.colorScheme.error
-        : theme.colorScheme.onSurface;
-    return InkWell(
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Container(
+        width: 46,
+        height: 46,
+        decoration: BoxDecoration(
+          color: theme.colorScheme.primary.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Icon(icon, color: theme.colorScheme.primary),
+      ),
+      title: Text(
+        title,
+        style: theme.textTheme.titleMedium?.copyWith(
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      subtitle: Text(subtitle),
+      trailing: const Icon(Icons.chevron_right_rounded),
       onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 14),
-        child: Row(
-          children: [
-            Icon(icon, color: color),
-            const SizedBox(width: 12),
-            Text(
-              label,
-              style: theme.textTheme.titleMedium?.copyWith(
-                color: color,
-                fontWeight: FontWeight.w700,
+    );
+  }
+}
+
+class _ListenerCountBadge extends StatelessWidget {
+  const _ListenerCountBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = compactCount(count);
+    return Container(
+      constraints: const BoxConstraints(minWidth: 22),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w900,
+          fontSize: 10,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
+class _LivePollCard extends StatelessWidget {
+  const _LivePollCard({
+    super.key,
+    required this.poll,
+    required this.selectedOptionId,
+    required this.onVote,
+  });
+
+  final Map<String, dynamic> poll;
+  final String? selectedOptionId;
+  final ValueChanged<String> onVote;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final question = '${poll['question'] ?? ''}'.trim();
+    final options = (poll['options'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList(growable: false);
+    final totalVotes =
+        (poll['totalVotes'] as num?)?.toInt() ??
+        options.fold<int>(
+          0,
+          (sum, option) => sum + ((option['votes'] as num?)?.toInt() ?? 0),
+        );
+    final concluded =
+        '${poll['status'] ?? 'active'}'.trim().toLowerCase() == 'concluded';
+    if (question.isEmpty || options.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.32),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.poll_outlined, color: Colors.white, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  question,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: concluded
+                      ? _LiveScreenState._audioRoomAccent.withValues(
+                          alpha: 0.24,
+                        )
+                      : Colors.white.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  concluded ? 'Final result' : '$totalVotes votes',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          for (final option in options) ...[
+            _LivePollOptionRow(
+              option: option,
+              totalVotes: totalVotes,
+              selected: '${option['id'] ?? ''}' == selectedOptionId,
+              enabled: !concluded,
+              onTap: concluded ? null : () => onVote('${option['id'] ?? ''}'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _LivePollOptionRow extends StatelessWidget {
+  const _LivePollOptionRow({
+    required this.option,
+    required this.totalVotes,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final Map<String, dynamic> option;
+  final int totalVotes;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = '${option['text'] ?? ''}'.trim();
+    final votes = (option['votes'] as num?)?.toInt() ?? 0;
+    final percent = totalVotes <= 0 ? 0.0 : votes / totalVotes;
+    return InkWell(
+      onTap: enabled ? onTap : null,
+      borderRadius: BorderRadius.circular(12),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: percent.clamp(0.0, 1.0),
+                child: ColoredBox(
+                  color: _LiveScreenState._audioRoomAccent.withValues(
+                    alpha: selected ? 0.46 : 0.26,
+                  ),
+                ),
               ),
             ),
-          ],
-        ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected
+                    ? _LiveScreenState._audioRoomAccent
+                    : Colors.white.withValues(alpha: 0.12),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  selected
+                      ? Icons.check_circle_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                  color: Colors.white,
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(percent * 100).round()}%',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -5986,251 +9916,16 @@ class _UnderlineTabSwitch extends StatelessWidget {
   }
 }
 
-class _MiniModeSwitch extends StatelessWidget {
-  const _MiniModeSwitch({
-    required this.leftLabel,
-    required this.rightLabel,
-    required this.value,
-    required this.onChanged,
-  });
-
-  final String leftLabel;
-  final String rightLabel;
-  final String value;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    Widget item(String itemValue, String label) {
-      final active = value == itemValue;
-      return InkWell(
-        onTap: () => onChanged(itemValue),
-        borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: AnimatedDefaultTextStyle(
-            duration: const Duration(milliseconds: 180),
-            style: theme.textTheme.labelLarge!.copyWith(
-              color: active
-                  ? theme.colorScheme.onSurface
-                  : theme.colorScheme.onSurfaceVariant,
-              fontWeight: active ? FontWeight.w800 : FontWeight.w700,
-            ),
-            child: Text(label),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          item('broadcast', leftLabel),
-          const SizedBox(width: 2),
-          item('groups', rightLabel),
-        ],
-      ),
-    );
-  }
-}
-
-class _RoomTagPill extends StatelessWidget {
-  const _RoomTagPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: Colors.white,
-          fontWeight: FontWeight.w800,
-        ),
-      ),
-    );
-  }
-}
-
-class _HostFlagBadge extends StatelessWidget {
-  const _HostFlagBadge({required this.code});
-
-  final String code;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 22,
-      height: 14,
-      child: Image.network(
-        'https://flagcdn.com/w40/${code.toLowerCase()}.png',
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-      ),
-    );
-  }
-}
-
-class _LiveRoomMenuButton extends StatelessWidget {
-  const _LiveRoomMenuButton({required this.title});
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return PopupMenuButton<String>(
-      tooltip: 'Room menu',
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      color: theme.colorScheme.surface,
-      onSelected: (value) {
-        if (value == 'report') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Report for "$title" is coming next')),
-          );
-        }
-      },
-      itemBuilder: (context) => const [
-        PopupMenuItem<String>(
-          value: 'report',
-          child: Row(
-            children: [
-              Icon(Icons.flag_outlined),
-              SizedBox(width: 10),
-              Text('Report'),
-            ],
-          ),
-        ),
-      ],
-      child: Container(
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surface.withValues(alpha: 0.9),
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: theme.colorScheme.outline.withValues(alpha: 0.12),
-          ),
-        ),
-        alignment: Alignment.center,
-        child: Icon(
-          Icons.more_horiz_rounded,
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-      ),
-    );
-  }
-}
-
-class _ControlChip extends StatelessWidget {
-  const _ControlChip({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.destructive = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool destructive;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final background = destructive
-        ? theme.colorScheme.errorContainer
-        : theme.colorScheme.surfaceContainerHighest;
-    final foreground = destructive
-        ? theme.colorScheme.onErrorContainer
-        : theme.colorScheme.onSurface;
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(
-          color: background,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 18, color: foreground),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: theme.textTheme.labelLarge?.copyWith(
-                color: foreground,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MetricChip extends StatelessWidget {
-  const _MetricChip({required this.icon, required this.label});
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
-          const SizedBox(width: 7),
-          Text(
-            label,
-            style: theme.textTheme.labelLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _AvatarBubble extends StatelessWidget {
   const _AvatarBubble({
     required this.photoUrl,
     required this.size,
     required this.fallback,
-    this.icon,
   });
 
   final String photoUrl;
   final double size;
   final String fallback;
-  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
@@ -6259,12 +9954,6 @@ class _AvatarBubble extends StatelessWidget {
       alignment: Alignment.center,
       child: photoUrl.isNotEmpty
           ? null
-          : icon != null
-          ? Icon(
-              icon,
-              size: size * 0.44,
-              color: theme.colorScheme.onSurfaceVariant,
-            )
           : Text(
               initials.toUpperCase(),
               style: theme.textTheme.titleMedium?.copyWith(
@@ -6275,47 +9964,16 @@ class _AvatarBubble extends StatelessWidget {
   }
 }
 
-String _flagCode(String code) {
-  final normalized = code.trim().toUpperCase();
-  if (normalized.length != 2) return '';
-  final first = normalized.codeUnitAt(0);
-  final second = normalized.codeUnitAt(1);
-  if (first < 0x41 || first > 0x5A || second < 0x41 || second > 0x5A) {
-    return '';
-  }
-  return normalized;
-}
-
-class _TinyPill extends StatelessWidget {
-  const _TinyPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.primary,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
 class _PulsingRing extends StatefulWidget {
-  const _PulsingRing({required this.child, this.diameter = 80});
+  const _PulsingRing({
+    required this.child,
+    this.diameter = 80,
+    this.effect = 'pulse',
+  });
 
   final Widget child;
   final double diameter;
+  final String effect;
 
   @override
   State<_PulsingRing> createState() => _PulsingRingState();
@@ -6355,25 +10013,103 @@ class _PulsingRingState extends State<_PulsingRing>
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
+        final effectColor = _micEffectColor(widget.effect);
+        final pulse = _controller.value;
+        final glowAlpha = 0.34 + (pulse * 0.28);
+        final borderAlpha = 0.62 + (pulse * 0.28);
+        final ringColor = effectColor.withValues(alpha: borderAlpha);
+        final baseScale = widget.effect == 'halo' ? 1.0 : _scale.value;
         return Stack(
           alignment: Alignment.center,
           children: [
             Transform.scale(
-              scale: _scale.value,
+              scale: 1.1 + (pulse * 0.1),
+              child: Container(
+                width: widget.diameter,
+                height: widget.diameter,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: effectColor.withValues(alpha: glowAlpha),
+                      blurRadius: 28 + (pulse * 18),
+                      spreadRadius: 1.4 + (pulse * 2.4),
+                    ),
+                    BoxShadow(
+                      color: effectColor.withValues(alpha: 0.16 + pulse * 0.1),
+                      blurRadius: 66 + (pulse * 18),
+                      spreadRadius: 4 + (pulse * 3),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (widget.effect == 'spotlight')
+              Opacity(
+                opacity: 0.48 + (pulse * 0.24),
+                child: Container(
+                  width: widget.diameter * 1.56,
+                  height: widget.diameter * 1.56,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        effectColor.withValues(alpha: 0.48),
+                        effectColor.withValues(alpha: 0.16),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            Transform.scale(
+              scale: baseScale,
               child: Container(
                 width: widget.diameter,
                 height: widget.diameter,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: _LiveScreenState._audioRoomAccent.withValues(
-                      alpha: _opacity.value,
-                    ),
-                    width: 3,
+                    color: ringColor,
+                    width: widget.effect == 'halo' ? 4.6 : 3.2,
                   ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: effectColor.withValues(alpha: 0.48 + pulse * 0.2),
+                      blurRadius: 16 + (pulse * 10),
+                      spreadRadius: widget.effect == 'halo' ? 2.5 : 0.8,
+                    ),
+                  ],
                 ),
               ),
             ),
+            if (widget.effect == 'echo')
+              Transform.scale(
+                scale: 1.08 + (_scale.value - 1.0) * 1.3,
+                child: Opacity(
+                  opacity: (_opacity.value * 0.55).clamp(0.0, 1.0),
+                  child: Container(
+                    width: widget.diameter,
+                    height: widget.diameter,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: effectColor.withValues(
+                          alpha: (0.42 + pulse * 0.28).clamp(0.0, 1.0),
+                        ),
+                        width: 2.4,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: effectColor.withValues(alpha: 0.28),
+                          blurRadius: 28,
+                          spreadRadius: 1.5,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             child!,
           ],
         );
@@ -7063,6 +10799,7 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
   static const _initialDelay = Duration(milliseconds: 650);
 
   late final AnimationController _controller;
+  Timer? _startTimer;
   bool _overflowing = false;
   double _cycleDistance = 0;
 
@@ -7077,6 +10814,7 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.text != widget.text || oldWidget.style != widget.style) {
       _overflowing = false;
+      _startTimer?.cancel();
       _controller
         ..stop()
         ..value = 0;
@@ -7085,11 +10823,12 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
 
   @override
   void dispose() {
+    _startTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
-  double _measureTextWidth(
+  Size _measureTextSize(
     String text,
     TextStyle style,
     TextDirection direction,
@@ -7101,7 +10840,7 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
       textScaler: scaler,
       maxLines: 1,
     )..layout(minWidth: 0, maxWidth: double.infinity);
-    return painter.width;
+    return painter.size;
   }
 
   void _updateAnimation({
@@ -7109,6 +10848,7 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
     required double cycleDistance,
   }) {
     if (!overflowing) {
+      _startTimer?.cancel();
       if (_overflowing || _controller.isAnimating || _controller.value != 0) {
         _controller
           ..stop()
@@ -7132,7 +10872,8 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
       ..stop()
       ..value = 0;
 
-    Future<void>.delayed(_initialDelay, () {
+    _startTimer?.cancel();
+    _startTimer = Timer(_initialDelay, () {
       if (!mounted || !_overflowing || _controller.duration == null) return;
       _controller.repeat();
     });
@@ -7156,12 +10897,14 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
           );
         }
 
-        final textWidth = _measureTextWidth(
+        final textSize = _measureTextSize(
           widget.text,
           style,
           direction,
           scaler,
         );
+        final textWidth = textSize.width;
+        final titleHeight = textSize.height.ceilToDouble();
         final overflowing = textWidth > constraints.maxWidth + 1;
         final cycleDistance = textWidth + _gap;
         final repeatedTrackWidth = (textWidth * 2) + _gap;
@@ -7171,49 +10914,65 @@ class _AutoScrollingTitleState extends State<_AutoScrollingTitle>
         );
 
         if (!overflowing) {
-          return Text(
-            widget.text,
-            style: style,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          return SizedBox(
+            width: constraints.maxWidth,
+            height: titleHeight,
+            child: Text(
+              widget.text,
+              style: style,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              softWrap: false,
+            ),
           );
         }
 
-        return ClipRect(
-          child: AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              final dx = -_controller.value * cycleDistance;
-              return Transform.translate(
-                offset: Offset(dx, 0),
-                child: OverflowBox(
-                  alignment: Alignment.centerLeft,
-                  minWidth: 0,
-                  maxWidth: repeatedTrackWidth,
-                  child: SizedBox(
-                    width: repeatedTrackWidth,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          widget.text,
-                          style: style,
-                          maxLines: 1,
-                          softWrap: false,
-                        ),
-                        const SizedBox(width: _gap),
-                        Text(
-                          widget.text,
-                          style: style,
-                          maxLines: 1,
-                          softWrap: false,
-                        ),
-                      ],
+        return SizedBox(
+          width: constraints.maxWidth,
+          height: titleHeight,
+          child: ClipRect(
+            child: AnimatedBuilder(
+              animation: _controller,
+              child: SizedBox(
+                width: repeatedTrackWidth,
+                height: titleHeight,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.text,
+                      style: style,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.visible,
                     ),
-                  ),
+                    const SizedBox(width: _gap),
+                    Text(
+                      widget.text,
+                      style: style,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.visible,
+                    ),
+                  ],
                 ),
-              );
-            },
+              ),
+              builder: (context, child) {
+                final dx = -_controller.value * cycleDistance;
+                return Stack(
+                  clipBehavior: Clip.hardEdge,
+                  children: [
+                    Positioned(
+                      left: dx,
+                      top: 0,
+                      width: repeatedTrackWidth,
+                      height: titleHeight,
+                      child: child!,
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
         );
       },
@@ -7263,6 +11022,80 @@ class _LivePulseDotState extends State<_LivePulseDot>
           ),
         );
       },
+    );
+  }
+}
+
+/// Animated pill that shows the host's cumulative heart count.
+class _HeartCountPill extends StatefulWidget {
+  const _HeartCountPill({required this.count});
+  final int count;
+
+  @override
+  State<_HeartCountPill> createState() => _HeartCountPillState();
+}
+
+class _HeartCountPillState extends State<_HeartCountPill>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _scale = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.28), weight: 40),
+      TweenSequenceItem(tween: Tween(begin: 1.28, end: 1.0), weight: 60),
+    ]).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+  }
+
+  @override
+  void didUpdateWidget(_HeartCountPill old) {
+    super.didUpdateWidget(old);
+    if (widget.count != old.count && widget.count > 0) {
+      _ctrl.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = widget.count >= 1000
+        ? '${(widget.count / 1000).toStringAsFixed(1)}k'
+        : '${widget.count}';
+    return ScaleTransition(
+      scale: _scale,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.favorite_rounded, color: Colors.white, size: 16),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

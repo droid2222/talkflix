@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'package:go_router/go_router.dart';
 
+import '../../../app/localization/talkflix_localizations.dart';
 import '../../../app/theme/app_theme.dart';
 
 class AuthShell extends StatelessWidget {
@@ -24,6 +25,7 @@ class AuthShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final background = theme.scaffoldBackgroundColor;
@@ -65,8 +67,11 @@ class AuthShell extends StatelessWidget {
                     ),
                   ),
                 ),
-                Center(
+                Positioned.fill(
                   child: SingleChildScrollView(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    physics: const AlwaysScrollableScrollPhysics(),
                     padding: EdgeInsets.fromLTRB(
                       24,
                       24 + topInset,
@@ -78,17 +83,40 @@ class AuthShell extends StatelessWidget {
                         minHeight:
                             constraints.maxHeight -
                             (48 + topInset + bottomInset),
-                        maxWidth: isWide ? 964 : maxCardWidth,
                       ),
-                      child: IntrinsicHeight(
-                        child: isWide
-                            ? Row(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Expanded(child: brandPanel!),
-                                  const SizedBox(width: 24),
-                                  Expanded(
-                                    child: Align(
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: isWide ? 964 : maxCardWidth,
+                          ),
+                          child: isWide
+                              ? Row(
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    Expanded(child: brandPanel!),
+                                    const SizedBox(width: 24),
+                                    Expanded(
+                                      child: Align(
+                                        alignment: Alignment.center,
+                                        child: _AuthCard(
+                                          maxWidth: maxCardWidth,
+                                          isDark: isDark,
+                                          child: cardChild,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (brandPanel != null) ...[
+                                      brandPanel!,
+                                      const SizedBox(height: 24),
+                                    ],
+                                    Align(
                                       alignment: Alignment.center,
                                       child: _AuthCard(
                                         maxWidth: maxCardWidth,
@@ -96,27 +124,9 @@ class AuthShell extends StatelessWidget {
                                         child: cardChild,
                                       ),
                                     ),
-                                  ),
-                                ],
-                              )
-                            : Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  if (brandPanel != null) ...[
-                                    brandPanel!,
-                                    const SizedBox(height: 24),
                                   ],
-                                  Align(
-                                    alignment: Alignment.center,
-                                    child: _AuthCard(
-                                      maxWidth: maxCardWidth,
-                                      isDark: isDark,
-                                      child: cardChild,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                        ),
                       ),
                     ),
                   ),
@@ -128,7 +138,7 @@ class AuthShell extends StatelessWidget {
                     child: IconButton.filledTonal(
                       onPressed: onBack ?? () => context.go('/login'),
                       icon: const Icon(Icons.arrow_back_ios_new_rounded),
-                      tooltip: 'Back',
+                      tooltip: l10n.authBackTooltip,
                     ),
                   ),
               ],

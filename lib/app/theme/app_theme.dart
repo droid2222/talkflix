@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 
 const talkflixPrimary = Color(0xFFE50914);
+const talkflixProBlue = Color(0xFF64B5FF);
+const talkflixProGradient = LinearGradient(
+  colors: [Color(0xFF2B6CFF), Color(0xFF1FCB7B), Color(0xFFFFD84D)],
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+);
 const _lightBackground = Color(0xFFFFFFFF);
 const _lightSurface = Color(0xFFFFFFFF);
 const _lightCard = Color(0xFFF6F6F7);

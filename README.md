@@ -40,6 +40,18 @@ Expected response:
 {"ok":true,"db":true}
 ```
 
+## Admin dashboard
+
+The standalone admin dashboard is documented in [`docs/admin-dashboard.md`](/Users/talkflix/talkflix_flutter/docs/admin-dashboard.md). It covers the public URL, production static file path, related backend API routes, and safe edit/deploy workflow.
+
+## Web homepage
+
+The public web homepage is documented in [`docs/web-homepage.md`](/Users/talkflix/talkflix_flutter/docs/web-homepage.md). It covers the `/` route, homepage source file, required logo/background assets, footer legal links, and safe-change checklist.
+
+## V1 release handoff
+
+The current v1 release scope, feature gates, IAP setup, direct-call notes, iOS launch-screen fix, notification-center behavior, production deployment checks, and launch blockers are documented in [`docs/v1-release-handoff.md`](/Users/talkflix/talkflix_flutter/docs/v1-release-handoff.md).
+
 ## Running the Flutter app
 
 All builds now default to the deployed API at `https://api.talkflix.cc` unless `API_BASE_URL` is provided explicitly.
@@ -101,12 +113,10 @@ If you do not want `.dev` in production, change both identifiers before submitti
 
 ## In-app QA tools
 
-- `Profile -> Diagnostics` shows the active API base URL, session state, socket state, backend health check, and quick links into the highest-risk product flows.
-- `Profile -> Diagnostics` also shows the current user ID and lets you copy it when matching device behavior to backend logs or database records.
-- `Profile -> QA progress` shows how far through the current QA pass you are and gives direct access to Diagnostics and the checklist.
-- `Diagnostics -> Open QA checklist` opens a persistent on-device checklist that keeps progress between app launches and can be reset for a fresh QA round.
-- `Diagnostics -> Open media preview` lets you verify camera/microphone permissions, local preview, and camera switching before testing live rooms or calls.
-- Direct chat, anonymous match, and live room status bars now include copy actions for thread, match, and room IDs so multi-device QA can be matched against backend logs more easily.
+- Diagnostics, QA checklist, and media preview routes are controlled by `AppConfig.localQaToolsEnabled`.
+- `AppConfig.localQaToolsEnabled` is `true` only in Flutter debug builds. Profile/release builds must not expose these routes or settings entries.
+- Diagnostic data that is useful after launch should be exposed through the standalone admin dashboard, not through reviewer-facing app navigation.
+- The shared `SessionStatusBar` widget is a QA helper. Do not mount it in normal production screens unless the same debug-only gate is used.
 
 ## QA checklist
 
@@ -115,7 +125,7 @@ If you do not want `.dev` in production, change both identifiers before submitti
 - Launch the app and log in with an existing account.
 - Confirm app shell navigation loads without blank screens.
 - Sign out and sign back in.
-- Open `Profile -> Diagnostics -> Open media preview` and confirm camera/microphone permission prompts and local preview work.
+- In a debug build, open `Profile -> Diagnostics -> Open media preview` and confirm camera/microphone permission prompts and local preview work.
 - Run through signup and verify each step advances correctly.
 - Start a trial from the upgrade screen and confirm the app session updates immediately.
 

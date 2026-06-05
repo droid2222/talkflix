@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ^3.11.1
@@ -30,6 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
 
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^2.6.1
@@ -38,14 +42,28 @@ dependencies:
   http: ^1.6.0
   http_parser: ^4.1.2
   image_picker: ^1.2.0
+  in_app_purchase: ^3.3.0
   file_picker: ^10.3.2
+  firebase_core: ^4.1.1
+  firebase_messaging: ^16.0.1
   intl: ^0.20.2
   just_audio: ^0.10.4
   livekit_client: ^2.5.2
   permission_handler: ^12.0.1
   record: ^6.1.2
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^7.2.0
+  gal: ^2.3.2
+  share_plus: ^10.1.4
   shared_preferences: ^2.5.4
   socket_io_client: ^3.1.2
+  url_launcher: ^6.3.1
+  flutter_ringtone_player: ^4.0.0+4
+  flutter_contacts: ^2.0.2
+  flutter_callkit_incoming: ^3.0.0
+  uuid: ^4.5.3
+  video_player: ^2.9.5
+  visibility_detector: ^0.4.0+2
 
 dev_dependencies:
   flutter_test:
@@ -71,6 +89,8 @@ flutter:
 
   assets:
     - assets/images/talkflix_logo.png
+    - assets/images/live_room_bg.png
+    - assets/images/icons/
     - assets/audio/anon-ringtone.wav
 
   # To add assets to your application, add an assets section, like this:

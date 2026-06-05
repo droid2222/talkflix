@@ -94,7 +94,11 @@ class _AudioMessagePlayerState extends State<AudioMessagePlayer> {
         final previousFile = File(previousLocalPath);
         unawaited(previousFile.delete().catchError((_) => previousFile));
       }
-      if (widget.source.startsWith('data:')) {
+      final localFilePath = _resolveLocalFilePath(widget.source);
+      if (localFilePath != null) {
+        _localPath = localFilePath;
+        await _player.setFilePath(localFilePath);
+      } else if (widget.source.startsWith('data:')) {
         final bytes = tryDecodeDataUrl(widget.source);
         if (bytes == null) {
           throw StateError('Invalid audio data');
@@ -242,5 +246,21 @@ class _AudioMessagePlayerState extends State<AudioMessagePlayer> {
     final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
+  }
+
+  String? _resolveLocalFilePath(String source) {
+    final trimmed = source.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed.startsWith('file://')) {
+      return Uri.parse(trimmed).toFilePath();
+    }
+    if (trimmed.startsWith('/uploads/')) {
+      return null;
+    }
+    if (!trimmed.startsWith('/')) {
+      return null;
+    }
+    final file = File(trimmed);
+    return file.existsSync() ? file.path : null;
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../config/app_config.dart';
 import '../realtime/socket_service.dart';
 
 class RealtimeStatusBanner extends ConsumerWidget {
@@ -64,10 +65,11 @@ class RealtimeStatusBanner extends ConsumerWidget {
               style: theme.textTheme.bodyMedium?.copyWith(color: color),
             ),
           ),
-          TextButton(
-            onPressed: () => context.push('/app/profile/diagnostics'),
-            child: const Text('Details'),
-          ),
+          if (AppConfig.localQaToolsEnabled)
+            TextButton(
+              onPressed: () => context.push('/app/profile/diagnostics'),
+              child: const Text('Details'),
+            ),
         ],
       ),
     );

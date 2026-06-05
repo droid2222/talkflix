@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 import '../config/app_config.dart';
 import '../auth/session_controller.dart';
@@ -103,6 +104,7 @@ class ApiClient {
 
   Future<Map<String, dynamic>> deleteJson(
     String path, {
+    Map<String, dynamic>? body,
     Duration? timeout,
     int? retries,
   }) {
@@ -110,17 +112,52 @@ class ApiClient {
       retries: retries,
       action: () async {
         final response = await _httpClient
-            .delete(_uri(path), headers: _headers())
+            .delete(
+              _uri(path),
+              headers: _headers(json: body != null),
+              body: body == null ? null : jsonEncode(body),
+            )
             .timeout(timeout ?? defaultTimeout);
         return _decode(response);
       },
     );
   }
 
+  Future<Map<String, dynamic>> postMultipart(
+    String path, {
+    required String fileField,
+    required Uint8List bytes,
+    required String filename,
+    MediaType? contentType,
+    Map<String, String>? fields,
+    Duration? timeout,
+    int? retries,
+  }) {
+    return _withRetry(
+      retries: retries,
+      action: () async {
+        final request = http.MultipartRequest('POST', _uri(path));
+        request.headers.addAll(_headers());
+        request.fields.addAll(fields ?? const <String, String>{});
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            fileField,
+            bytes,
+            filename: filename,
+            contentType: contentType,
+          ),
+        );
+        final streamed = await _httpClient
+            .send(request)
+            .timeout(timeout ?? const Duration(seconds: 45));
+        final response = await http.Response.fromStream(streamed);
+        return _decode(response);
+      },
+    );
+  }
+
   Map<String, String> _headers({bool json = false}) {
-    final headers = <String, String>{
-      'Accept': 'application/json',
-    };
+    final headers = <String, String>{'Accept': 'application/json'};
     if (json) {
       headers['Content-Type'] = 'application/json';
     }
@@ -131,9 +168,7 @@ class ApiClient {
   }
 
   Map<String, dynamic> _decode(http.Response response) {
-    final dynamic payload = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body);
+    final dynamic payload = _decodePayload(response);
     final data = payload is Map<String, dynamic>
         ? payload
         : <String, dynamic>{'data': payload};
@@ -146,6 +181,36 @@ class ApiClient {
       data['message']?.toString() ?? 'Request failed',
       statusCode: response.statusCode,
     );
+  }
+
+  dynamic _decodePayload(http.Response response) {
+    if (response.body.isEmpty) {
+      return <String, dynamic>{};
+    }
+    try {
+      return jsonDecode(response.body);
+    } catch (_) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return <String, dynamic>{'raw': response.body};
+      }
+      return <String, dynamic>{
+        'message': _nonJsonErrorMessage(response),
+        'raw': response.body,
+      };
+    }
+  }
+
+  String _nonJsonErrorMessage(http.Response response) {
+    switch (response.statusCode) {
+      case 413:
+        return 'The upload is larger than the server currently allows.';
+      case 502:
+      case 503:
+      case 504:
+        return 'The server is temporarily unavailable. Please try again.';
+      default:
+        return 'Request failed with status ${response.statusCode}.';
+    }
   }
 
   /// Retries on network errors, timeouts, 5xx, and 429 with exponential backoff.
@@ -179,7 +244,9 @@ class ApiClient {
       );
       if (kDebugMode) {
         // ignore: avoid_print
-        print('[ApiClient] Retry ${attempt + 1}/$maxRetries after ${delay.inMilliseconds}ms');
+        print(
+          '[ApiClient] Retry ${attempt + 1}/$maxRetries after ${delay.inMilliseconds}ms',
+        );
       }
       await Future<void>.delayed(delay);
     }

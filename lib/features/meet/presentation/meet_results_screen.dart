@@ -3,10 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/auth/session_controller.dart';
+import '../../../core/config/privacy_settings_controller.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/widgets/app_avatar.dart';
 import '../../upgrade/presentation/pro_access_sheet.dart';
 import 'meet_filters_controller.dart';
+import 'meet_user_filter.dart';
+import 'meet_user_privacy.dart';
 
 final meetResultsProvider = FutureProvider<List<Map<String, dynamic>>>((
   ref,
@@ -15,13 +18,18 @@ final meetResultsProvider = FutureProvider<List<Map<String, dynamic>>>((
   if (userId == null || userId.isEmpty) {
     return const <Map<String, dynamic>>[];
   }
+  final user = ref.watch(sessionControllerProvider.select((s) => s.user));
+  final isProLike = user?.isProLike == true;
+  final learningLanguage = (user?.learnLanguage ?? '').trim();
   final filters = ref.watch(meetFiltersProvider);
   final query = <String, String>{'limit': '80', 'offset': '0'};
 
-  if (filters.selectedNativeLanguage != 'Any') {
+  if (!isProLike && learningLanguage.isNotEmpty) {
+    query['lang'] = learningLanguage;
+  } else if (filters.selectedNativeLanguage != 'Any') {
     query['lang'] = filters.selectedNativeLanguage;
   }
-  if (filters.selectedLearningLanguage != 'Any') {
+  if (isProLike && filters.selectedLearningLanguage != 'Any') {
     query['learn'] = filters.selectedLearningLanguage;
   }
   query['minAge'] = filters.minAge.toString();
@@ -29,16 +37,18 @@ final meetResultsProvider = FutureProvider<List<Map<String, dynamic>>>((
   if (filters.newUsersOnly) {
     query['newUsers'] = 'true';
   }
-  if (filters.useProSearch && filters.selectedCountry != 'Any') {
+  if (isProLike && filters.useProSearch && filters.selectedCountry != 'Any') {
     query['country'] = filters.selectedCountry;
   }
-  if (filters.useProSearch && filters.selectedCity != 'Any') {
+  if (isProLike && filters.useProSearch && filters.selectedCity != 'Any') {
     query['city'] = filters.selectedCity;
   }
-  if (filters.useProSearch && filters.selectedGender != 'all') {
+  if (isProLike && filters.useProSearch && filters.selectedGender != 'all') {
     query['gender'] = filters.selectedGender;
   }
-  if (filters.useProSearch && filters.prioritizeNearby) {
+  if (isProLike &&
+      (filters.discoveryMode == MeetDiscoveryMode.nearby ||
+          (filters.useProSearch && filters.prioritizeNearby))) {
     query['nearby'] = 'true';
   }
 
@@ -46,9 +56,7 @@ final meetResultsProvider = FutureProvider<List<Map<String, dynamic>>>((
       .read(apiClientProvider)
       .getJson('/meet/users', queryParameters: query);
 
-  return (data['users'] as List<dynamic>? ?? const [])
-      .whereType<Map<String, dynamic>>()
-      .toList();
+  return discoverableMeetUsers(data['users']);
 });
 
 class MeetResultsScreen extends ConsumerWidget {
@@ -57,6 +65,9 @@ class MeetResultsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final session = ref.watch(sessionControllerProvider);
+    final privacySettings = ref.watch(privacySettingsControllerProvider);
+    final currentUserId = session.user?.id ?? '';
     final results = ref.watch(meetResultsProvider);
 
     return Scaffold(
@@ -99,6 +110,16 @@ class MeetResultsScreen extends ConsumerWidget {
                           user['role']?.toString() == 'admin';
                       final displayName =
                           user['displayName']?.toString() ?? 'User';
+                      final ageLabel = visibleMeetAgeLabel(
+                        user: user,
+                        currentUserId: currentUserId,
+                        privacy: privacySettings,
+                      );
+                      final showFlag = shouldShowMeetFlag(
+                        user: user,
+                        currentUserId: currentUserId,
+                        privacy: privacySettings,
+                      );
                       final flagCode = _flagCode(
                         user['nationalityCode']?.toString() ??
                             user['countryCode']?.toString() ??
@@ -111,7 +132,7 @@ class MeetResultsScreen extends ConsumerWidget {
                           user['country'].toString(),
                       ].join(', ');
                       final languageLine =
-                          "${user['firstLanguage'] ?? 'Any'} -> ${user['learnLanguage'] ?? 'Any'}";
+                          "${user['firstLanguage'] ?? 'Any'} -> ${user['learnLanguage'] ?? 'Any'}${ageLabel.isNotEmpty ? ' • $ageLabel' : ''}";
 
                       return InkWell(
                         onTap: () => context.push('/app/profile/${user['id']}'),
@@ -143,7 +164,8 @@ class MeetResultsScreen extends ConsumerWidget {
                                                 ),
                                           ),
                                         ),
-                                        if (flagCode.isNotEmpty) ...[
+                                        if (showFlag &&
+                                            flagCode.isNotEmpty) ...[
                                           const SizedBox(width: 4),
                                           _FlagBadge(code: flagCode),
                                         ],

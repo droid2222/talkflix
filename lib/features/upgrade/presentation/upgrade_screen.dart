@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/auth/session_controller.dart';
+import '../../../core/config/app_config.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../core/widgets/feature_scaffold.dart';
 import '../../auth/data/auth_repository.dart';
+import 'pro_purchase_controller.dart';
 
 class UpgradeScreen extends ConsumerStatefulWidget {
   const UpgradeScreen({super.key});
@@ -48,35 +50,260 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final session = ref.watch(sessionControllerProvider);
+    final user = session.user;
+    final purchaseState = ref.watch(proPurchaseControllerProvider);
+    final purchaseController = ref.read(proPurchaseControllerProvider.notifier);
+    final theme = Theme.of(context);
+    final isProLike = user?.isProLike == true;
+    final canStartTrial = user != null && !user.trialUsed && !isProLike;
+
     return FeatureScaffold(
       title: 'Upgrade',
       children: [
         SectionCard(
-          title: 'Plan foundation',
+          title: 'Talkflix Pro',
           subtitle:
-              'The backend already supports a trial start endpoint. Subscription checkout can be layered in once the mobile purchase strategy is defined.',
+              'Upgrade with Apple App Store or Google Play billing. Prices and renewal terms are shown by the store before you confirm.',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (isProLike) ...[
+                _StatusBanner(
+                  text: user!.plan == 'trial'
+                      ? 'Your free trial access is active.'
+                      : 'Talkflix Pro is active on this account.',
+                  color: const Color(0xFF0F8A4B),
+                ),
+                const SizedBox(height: 14),
+              ],
               if (_message != null) ...[
-                Text(_message!),
+                _StatusBanner(text: _message!, color: const Color(0xFF0F8A4B)),
                 const SizedBox(height: 12),
               ],
-              if (_error != null) ...[
-                Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+              if (purchaseState.message != null) ...[
+                _StatusBanner(
+                  text: purchaseState.message!,
+                  color: const Color(0xFF0F8A4B),
                 ),
                 const SizedBox(height: 12),
               ],
-              FilledButton(
-                onPressed: _loading ? null : _startTrial,
-                child: Text(_loading ? 'Starting...' : 'Start trial'),
+              if (_error != null) ...[
+                _StatusBanner(text: _error!, color: theme.colorScheme.error),
+                const SizedBox(height: 12),
+              ],
+              if (purchaseState.error != null) ...[
+                _StatusBanner(
+                  text: purchaseState.error!,
+                  color: theme.colorScheme.error,
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (purchaseState.loadingProducts) ...[
+                const Center(child: CircularProgressIndicator()),
+                const SizedBox(height: 12),
+              ] else if (!purchaseState.storeAvailable) ...[
+                Text(
+                  AppConfig.paidUpgradeEnabled
+                      ? 'Pro plans are not available from the store on this device right now.'
+                      : 'Paid upgrades are disabled for this build.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: purchaseState.busy
+                      ? null
+                      : purchaseController.loadProducts,
+                  child: const Text('Try again'),
+                ),
+                const SizedBox(height: 12),
+              ] else if (purchaseState.products.isEmpty) ...[
+                Text(
+                  'The store did not return available Pro plans yet. Confirm the product IDs are configured in App Store Connect and Play Console.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: purchaseState.busy
+                      ? null
+                      : purchaseController.loadProducts,
+                  child: const Text('Reload plans'),
+                ),
+                const SizedBox(height: 12),
+              ] else ...[
+                for (final product in purchaseState.products) ...[
+                  _ProPlanCard(
+                    title: _planTitle(product.id, product.title),
+                    description: product.description.isEmpty
+                        ? 'Auto-renewing Talkflix Pro subscription.'
+                        : product.description,
+                    price: product.price,
+                    loading:
+                        purchaseState.buyingProductId == product.id ||
+                        purchaseState.processingPurchase,
+                    disabled: purchaseState.busy || isProLike,
+                    onPressed: () => purchaseController.buy(product),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ],
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: purchaseState.busy
+                      ? null
+                      : purchaseController.restore,
+                  child: Text(
+                    purchaseState.restoring
+                        ? 'Restoring...'
+                        : 'Restore purchases',
+                  ),
+                ),
               ),
+              if (canStartTrial) ...[
+                const SizedBox(height: 18),
+                Divider(color: theme.colorScheme.outlineVariant),
+                const SizedBox(height: 14),
+                Text(
+                  'Not ready to subscribe?',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Start your one-time free trial first. After it ends, subscribe through the store to keep Pro active.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.tonal(
+                  onPressed: _loading ? null : _startTrial,
+                  child: Text(_loading ? 'Starting...' : 'Start free trial'),
+                ),
+              ] else if (!isProLike && user?.trialUsed == true) ...[
+                const SizedBox(height: 14),
+                Text(
+                  'Your free trial has already been used. Choose a Pro plan above to continue.',
+                  style: TextStyle(color: theme.colorScheme.error),
+                ),
+              ],
             ],
           ),
         ),
       ],
+    );
+  }
+
+  String _planTitle(String productId, String storeTitle) {
+    final normalizedId = productId.toLowerCase();
+    if ((normalizedId.contains('3') && normalizedId.contains('month')) ||
+        normalizedId.contains('quarter')) {
+      return 'Talkflix Pro 3 Months';
+    }
+    if (normalizedId.contains('year')) return 'Talkflix Pro Yearly';
+    if (normalizedId.contains('month')) return 'Talkflix Pro Monthly';
+    return storeTitle.trim().isEmpty ? 'Talkflix Pro' : storeTitle.trim();
+  }
+}
+
+class _StatusBanner extends StatelessWidget {
+  const _StatusBanner({required this.text, required this.color});
+
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(text, style: TextStyle(color: color)),
+    );
+  }
+}
+
+class _ProPlanCard extends StatelessWidget {
+  const _ProPlanCard({
+    required this.title,
+    required this.description,
+    required this.price,
+    required this.loading,
+    required this.disabled,
+    required this.onPressed,
+  });
+
+  final String title;
+  final String description;
+  final String price;
+  final bool loading;
+  final bool disabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      description,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                price,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: disabled ? null : onPressed,
+              child: Text(loading ? 'Processing...' : 'Subscribe'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

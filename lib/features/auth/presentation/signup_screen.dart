@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../app/localization/talkflix_localizations.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/widgets/feature_scaffold.dart';
 import '../data/signup_options.dart';
+import 'auth_shell.dart';
 import 'signup_controller.dart';
 
 class SignupScreen extends ConsumerStatefulWidget {
@@ -86,11 +90,26 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
           sessionId: result.sessionId,
           user: result.user,
         );
-    if (mounted) context.go('/app/talk');
+    if (!mounted) return;
+    final next = GoRouterState.of(context).uri.queryParameters['next'] ?? '';
+    Uri? target;
+    try {
+      target = Uri.tryParse(Uri.decodeComponent(next));
+    } catch (_) {
+      target = null;
+    }
+    if (target != null &&
+        target.hasAbsolutePath &&
+        !target.path.startsWith('//')) {
+      context.go(target.toString());
+      return;
+    }
+    context.go('/app/content');
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final state = ref.watch(signupControllerProvider);
     final controller = ref.read(signupControllerProvider.notifier);
     _syncController(_emailController, state.email);
@@ -99,256 +118,397 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
     _syncController(_displayNameController, state.displayName);
     _syncController(_dobController, state.dob);
 
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          onPressed: state.busy
-              ? null
-              : state.step == SignupStep.account
-              ? () => context.go('/login')
-              : controller.previousStep,
-          icon: const Icon(Icons.arrow_back_ios_new_rounded),
-          tooltip: state.step == SignupStep.account ? 'Back to login' : 'Back',
-        ),
-        title: const Text('Create account'),
+    final backAction = state.step == SignupStep.account
+        ? () => context.go('/login')
+        : controller.previousStep;
+
+    return AuthShell(
+      showBackButton: true,
+      onBack: state.busy ? null : backAction,
+      maxCardWidth: 560,
+      brandPanel: AuthBrandPanel(
+        title: l10n.createAccount,
+        copy: l10n.authBrandCopy,
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          Text(
-            'Step ${state.step.index + 1} of 4',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 12),
-          LinearProgressIndicator(value: (state.step.index + 1) / 4),
-          const SizedBox(height: 20),
-          if (state.errorMessage != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                state.errorMessage!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+      cardChild: LayoutBuilder(
+        builder: (context, constraints) {
+          final roomy = constraints.maxWidth >= 500;
+          final stepChildren = <Widget>[
+            if (state.step == SignupStep.account) ...[
+              SectionCard(
+                title: l10n.accountVerification,
+                subtitle: l10n.accountVerificationSubtitle,
+                child: const SizedBox.shrink(),
               ),
-            ),
-          if (state.statusMessage != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(state.statusMessage!),
-            ),
-          if (state.step == SignupStep.account) ...[
-            const SectionCard(
-              title: 'Account verification',
-              subtitle:
-                  'Use a real email so you can verify your account and recover your password later.',
-              child: SizedBox.shrink(),
-            ),
-            TextField(
-              controller: _emailController,
-              keyboardType: TextInputType.emailAddress,
-              decoration: const InputDecoration(labelText: 'Email'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _passwordController,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Password (min 6)'),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton(
-              onPressed: state.busy || !state.canResendCode
-                  ? null
-                  : controller.sendCode,
-              child: Text(
-                state.busy
-                    ? 'Sending...'
-                    : state.resendCooldownSeconds > 0
-                    ? 'Resend in ${_formatCooldown(state.resendCooldownSeconds)}'
-                    : state.statusMessage != null ||
-                          state.verified ||
-                          state.emailVerificationToken.isNotEmpty
-                    ? 'Resend verification code'
-                    : 'Send verification code',
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _codeController,
-              decoration: const InputDecoration(labelText: 'Verification code'),
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            ),
-            const SizedBox(height: 12),
-            FilledButton(
-              onPressed: state.busy ? null : controller.verifyCode,
-              child: Text(state.verified ? 'Verified' : 'Verify code'),
-            ),
-          ],
-          if (state.step == SignupStep.profile) ...[
-            TextField(
-              controller: _displayNameController,
-              decoration: const InputDecoration(labelText: 'Display name'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              decoration: const InputDecoration(labelText: 'Date of birth'),
-              readOnly: true,
-              controller: _dobController,
-              onTap: () async {
-                final now = DateTime.now();
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: DateTime(now.year - 18),
-                  firstDate: DateTime(1900),
-                  lastDate: DateTime(now.year - 13, now.month, now.day),
-                );
-                if (picked != null) {
-                  controller.updateDob(
-                    picked.toIso8601String().split('T').first,
-                  );
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            SegmentedButton<String>(
-              emptySelectionAllowed: true,
-              segments: const [
-                ButtonSegment(value: 'male', label: Text('Male')),
-                ButtonSegment(value: 'female', label: Text('Female')),
-              ],
-              selected: state.gender.isEmpty ? const {} : {state.gender},
-              onSelectionChanged: (selection) {
-                if (selection.isNotEmpty) {
-                  controller.updateGender(selection.first);
-                }
-              },
-            ),
-          ],
-          if (state.step == SignupStep.languages) ...[
-            DropdownButtonFormField<String>(
-              initialValue: state.fromCountry.isEmpty
-                  ? null
-                  : state.fromCountry,
-              items: countryOptions
-                  .map(
-                    (option) => DropdownMenuItem<String>(
-                      value: option['code'],
-                      child: Text(option['label']!),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) => controller.updateFromCountry(value ?? ''),
-              decoration: const InputDecoration(
-                labelText: 'Where you are from',
-              ),
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: state.firstLanguage.isEmpty
-                  ? null
-                  : state.firstLanguage,
-              items: languageOptions
-                  .map(
-                    (option) => DropdownMenuItem<String>(
-                      value: option,
-                      child: Text(option),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) => controller.updateFirstLanguage(value ?? ''),
-              decoration: const InputDecoration(labelText: 'First language'),
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: state.learnLanguage.isEmpty
-                  ? null
-                  : state.learnLanguage,
-              items: languageOptions
-                  .map(
-                    (option) => DropdownMenuItem<String>(
-                      value: option,
-                      child: Text(option),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) => controller.updateLearnLanguage(value ?? ''),
-              decoration: const InputDecoration(labelText: 'Language to learn'),
-            ),
-          ],
-          if (state.step == SignupStep.photo) ...[
-            SectionCard(
-              title: 'Profile photo',
-              subtitle:
-                  'Optional for now. You can upload one later from your profile.',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (state.profilePhotoBytes != null)
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
-                      child: Image.memory(
-                        state.profilePhotoBytes!,
-                        height: 180,
-                        width: 180,
-                        fit: BoxFit.cover,
+              if (roomy)
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _emailController,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: InputDecoration(labelText: l10n.email),
                       ),
                     ),
-                  const SizedBox(height: 12),
-                  OutlinedButton(
-                    onPressed: _pickPhoto,
-                    child: Text(
-                      state.profilePhotoBytes == null
-                          ? 'Choose photo'
-                          : 'Replace photo',
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _passwordController,
+                        obscureText: true,
+                        decoration: InputDecoration(
+                          labelText: l10n.passwordMinSixLabel,
+                        ),
+                      ),
                     ),
-                  ),
-                  if (state.profilePhotoBytes != null)
-                    TextButton(
-                      onPressed: controller.removeProfilePhoto,
-                      child: const Text('Remove photo'),
-                    ),
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              if (state.step != SignupStep.account)
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: state.busy ? null : controller.previousStep,
-                    child: const Text('Back'),
+                  ],
+                )
+              else ...[
+                TextField(
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: InputDecoration(labelText: l10n.email),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    labelText: l10n.passwordMinSixLabel,
                   ),
                 ),
-              if (state.step != SignupStep.account) const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton(
-                  onPressed: state.busy
-                      ? null
-                      : state.step == SignupStep.photo
-                      ? _submit
-                      : state.canContinue
-                      ? controller.nextStep
-                      : null,
-                  child: Text(
-                    state.busy
-                        ? 'Working...'
-                        : state.step == SignupStep.photo
-                        ? 'Create account'
-                        : 'Continue',
+              ],
+              const SizedBox(height: 12),
+              if (roomy)
+                Row(
+                  children: [
+                    Expanded(child: _SendCodeButton(state: state)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _codeController,
+                        decoration: InputDecoration(
+                          labelText: l10n.verificationCode,
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: state.busy ? null : controller.verifyCode,
+                        child: Text(
+                          state.verified ? l10n.verified : l10n.verifyCode,
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              else ...[
+                _SendCodeButton(state: state),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _codeController,
+                  decoration: InputDecoration(labelText: l10n.verificationCode),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: state.busy ? null : controller.verifyCode,
+                    child: Text(
+                      state.verified ? l10n.verified : l10n.verifyCode,
+                    ),
                   ),
+                ),
+              ],
+            ],
+            if (state.step == SignupStep.profile) ...[
+              if (roomy)
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _displayNameController,
+                        decoration: InputDecoration(
+                          labelText: l10n.displayName,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        decoration: InputDecoration(
+                          labelText: l10n.dateOfBirth,
+                        ),
+                        readOnly: true,
+                        controller: _dobController,
+                        onTap: () => unawaited(_pickDob(controller)),
+                      ),
+                    ),
+                  ],
+                )
+              else ...[
+                TextField(
+                  controller: _displayNameController,
+                  decoration: InputDecoration(labelText: l10n.displayName),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  decoration: InputDecoration(labelText: l10n.dateOfBirth),
+                  readOnly: true,
+                  controller: _dobController,
+                  onTap: () => unawaited(_pickDob(controller)),
+                ),
+              ],
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<String>(
+                  emptySelectionAllowed: true,
+                  segments: [
+                    ButtonSegment(value: 'male', label: Text(l10n.male)),
+                    ButtonSegment(value: 'female', label: Text(l10n.female)),
+                  ],
+                  selected: state.gender.isEmpty ? const {} : {state.gender},
+                  onSelectionChanged: (selection) {
+                    if (selection.isNotEmpty) {
+                      controller.updateGender(selection.first);
+                    }
+                  },
                 ),
               ),
             ],
-          ),
-          if (state.step == SignupStep.account)
-            TextButton(
-              onPressed: () => context.go('/login'),
-              child: const Text('Already have an account? Login'),
-            ),
-        ],
+            if (state.step == SignupStep.languages) ...[
+              DropdownButtonFormField<String>(
+                initialValue: state.fromCountry.isEmpty
+                    ? null
+                    : state.fromCountry,
+                items: countryOptions
+                    .map(
+                      (option) => DropdownMenuItem<String>(
+                        value: option['code'],
+                        child: Text(option['label']!),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) => controller.updateFromCountry(value ?? ''),
+                decoration: InputDecoration(labelText: l10n.whereYouAreFrom),
+              ),
+              const SizedBox(height: 12),
+              if (roomy)
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: state.firstLanguage.isEmpty
+                            ? null
+                            : state.firstLanguage,
+                        items: languageOptions
+                            .map(
+                              (option) => DropdownMenuItem<String>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) =>
+                            controller.updateFirstLanguage(value ?? ''),
+                        decoration: InputDecoration(
+                          labelText: l10n.firstLanguage,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: state.learnLanguage.isEmpty
+                            ? null
+                            : state.learnLanguage,
+                        items: languageOptions
+                            .map(
+                              (option) => DropdownMenuItem<String>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) =>
+                            controller.updateLearnLanguage(value ?? ''),
+                        decoration: InputDecoration(
+                          labelText: l10n.languageToLearn,
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              else ...[
+                DropdownButtonFormField<String>(
+                  initialValue: state.firstLanguage.isEmpty
+                      ? null
+                      : state.firstLanguage,
+                  items: languageOptions
+                      .map(
+                        (option) => DropdownMenuItem<String>(
+                          value: option,
+                          child: Text(option),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) =>
+                      controller.updateFirstLanguage(value ?? ''),
+                  decoration: InputDecoration(labelText: l10n.firstLanguage),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: state.learnLanguage.isEmpty
+                      ? null
+                      : state.learnLanguage,
+                  items: languageOptions
+                      .map(
+                        (option) => DropdownMenuItem<String>(
+                          value: option,
+                          child: Text(option),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) =>
+                      controller.updateLearnLanguage(value ?? ''),
+                  decoration: InputDecoration(labelText: l10n.languageToLearn),
+                ),
+              ],
+            ],
+            if (state.step == SignupStep.photo) ...[
+              SectionCard(
+                title: l10n.profilePhoto,
+                subtitle: l10n.profilePhotoSubtitle,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (state.profilePhotoBytes != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(20),
+                        child: Image.memory(
+                          state.profilePhotoBytes!,
+                          height: 180,
+                          width: 180,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: _pickPhoto,
+                      child: Text(
+                        state.profilePhotoBytes == null
+                            ? l10n.choosePhoto
+                            : l10n.replacePhoto,
+                      ),
+                    ),
+                    if (state.profilePhotoBytes != null)
+                      TextButton(
+                        onPressed: controller.removeProfilePhoto,
+                        child: Text(l10n.removePhoto),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ];
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                l10n.createAccount,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                l10n.stepOf(state.step.index + 1, 4),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 16),
+              LinearProgressIndicator(value: (state.step.index + 1) / 4),
+              const SizedBox(height: 20),
+              if (state.errorMessage != null) ...[
+                _SignupMessage(text: state.errorMessage!, isError: true),
+                const SizedBox(height: 12),
+              ],
+              if (state.statusMessage != null) ...[
+                _SignupMessage(text: state.statusMessage!),
+                const SizedBox(height: 12),
+              ],
+              ...stepChildren,
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  if (state.step != SignupStep.account)
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: state.busy ? null : controller.previousStep,
+                        child: Text(l10n.back),
+                      ),
+                    ),
+                  if (state.step != SignupStep.account)
+                    const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: state.busy
+                          ? null
+                          : state.step == SignupStep.photo
+                          ? _submit
+                          : state.canContinue
+                          ? controller.nextStep
+                          : null,
+                      child: Text(
+                        state.busy
+                            ? l10n.working
+                            : state.step == SignupStep.photo
+                            ? l10n.createAccountButton
+                            : l10n.continueAction,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (state.step == SignupStep.account) ...[
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => context.go('/login'),
+                  child: Text(l10n.alreadyHaveAccountLogin),
+                ),
+              ],
+            ],
+          );
+        },
       ),
     );
+  }
+
+  Future<void> _pickDob(SignupController controller) async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime(now.year - 18),
+      firstDate: DateTime(1900),
+      lastDate: DateTime(now.year - 13, now.month, now.day),
+    );
+    if (picked != null) {
+      controller.updateDob(picked.toIso8601String().split('T').first);
+    }
   }
 
   void _syncController(TextEditingController controller, String value) {
@@ -359,10 +519,67 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
       composing: TextRange.empty,
     );
   }
+}
+
+class _SendCodeButton extends ConsumerWidget {
+  const _SendCodeButton({required this.state});
+
+  final SignupState state;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final controller = ref.read(signupControllerProvider.notifier);
+    return OutlinedButton(
+      onPressed: state.busy || !state.canResendCode
+          ? null
+          : controller.sendCode,
+      child: Text(
+        state.busy
+            ? l10n.sending
+            : state.resendCooldownSeconds > 0
+            ? l10n.resendIn(_formatCooldown(state.resendCooldownSeconds))
+            : state.statusMessage != null ||
+                  state.verified ||
+                  state.emailVerificationToken.isNotEmpty
+            ? l10n.resendVerificationCode
+            : l10n.sendVerificationCode,
+      ),
+    );
+  }
 
   String _formatCooldown(int seconds) {
     final minutes = (seconds ~/ 60).toString().padLeft(1, '0');
     final remainingSeconds = (seconds % 60).toString().padLeft(2, '0');
     return '$minutes:$remainingSeconds';
+  }
+}
+
+class _SignupMessage extends StatelessWidget {
+  const _SignupMessage({required this.text, this.isError = false});
+
+  final String text;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color:
+            (isError ? scheme.errorContainer : scheme.surfaceContainerHighest)
+                .withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: isError ? scheme.onErrorContainer : scheme.onSurfaceVariant,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
   }
 }

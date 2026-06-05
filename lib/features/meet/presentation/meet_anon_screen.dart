@@ -16,9 +16,11 @@ import '../../../core/network/api_client.dart';
 import '../../../core/auth/app_user.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
+import '../../../core/config/talkflix_icons.dart';
 import '../../../core/media/audio_message_player.dart';
 import '../../../core/media/media_permission_service.dart';
 import '../../../core/media/media_utils.dart';
+import '../../../core/realtime/direct_call_backend_service.dart';
 import '../../../core/realtime/socket_service.dart';
 import '../../../core/realtime/webrtc_service.dart';
 import '../../../core/widgets/realtime_warning_banner.dart';
@@ -87,10 +89,13 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
   bool _shouldRequeueOnReconnect = false;
   bool _rejoiningAfterReconnect = false;
   bool _ignoreNextLeftEvent = false;
+  bool _remoteAudioSeen = false;
+  bool _reportSubmitting = false;
   int _searchIntentToken = 0;
   String _socketStatus = 'disconnected';
   String? _status;
   Future<void>? _callPreparationFuture;
+  Map<String, dynamic>? _rtcPeerConnectionConfig;
 
   String get _meId => ref.read(sessionControllerProvider).user?.id ?? '';
   SocketService get _socket => ref.read(socketServiceProvider);
@@ -171,8 +176,13 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     _socket.off('rtc:ice', _onRtcIce);
     _socket.removeListener(_handleSocketStatusChanged);
     unawaited(_cleanupCall(sendSignal: false));
-    if (_phase == 'searching' || _matchId != null) {
-      _socket.emit('match:leave', null);
+    if (_matchId != null) {
+      _socket.emit('match:leave', <String, dynamic>{
+        'source': 'dispose',
+        'phase': _phase,
+      });
+    } else if (_phase == 'searching') {
+      _socket.emit('match:cancel-search', null);
     }
     _localRenderer.dispose();
     _remoteRenderer.dispose();
@@ -229,7 +239,7 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
   void _cancelSearch() {
     _autoRejoinTimer?.cancel();
     _searchIntentToken += 1;
-    _socket.emit('match:leave', null);
+    _socket.emit('match:cancel-search', null);
     setState(() {
       _phase = 'criteria';
       _status = null;
@@ -273,18 +283,38 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
       _status = null;
       _messages.clear();
     });
-    _socket.emit('match:leave', null);
+    _socket.emit('match:leave', <String, dynamic>{
+      'source': 'close_match',
+      'phase': _phase,
+    });
   }
 
   void _onMatchFound(dynamic data) {
     if (data is! Map || !mounted) return;
     final payload = Map<String, dynamic>.from(data);
+    final matchId = payload['matchId']?.toString().trim() ?? '';
+    final partnerId = payload['partnerId']?.toString().trim() ?? '';
+    if (matchId.isEmpty || partnerId.isEmpty) {
+      _socket.emit('match:leave', <String, dynamic>{
+        'source': 'malformed_match_found',
+        'phase': _phase,
+      });
+      setState(() {
+        _phase = 'criteria';
+        _matchId = null;
+        _partnerId = null;
+        _theirTyping = false;
+        _secondsRemaining = 0;
+        _status = 'Match could not be completed. Please try again.';
+      });
+      return;
+    }
     final endsAt = (payload['endsAt'] as num?)?.toInt() ?? 0;
     setState(() {
       _ignoreNextLeftEvent = false;
       _phase = 'chat';
-      _matchId = payload['matchId']?.toString();
-      _partnerId = payload['partnerId']?.toString();
+      _matchId = matchId;
+      _partnerId = partnerId;
       _messages
         ..clear()
         ..add(_AnonMessage.system('Matched! Say hi 👋'));
@@ -327,7 +357,15 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
       _callOpen = false;
       _shouldRequeueOnReconnect = false;
     });
-    if (reason == 'skipped' || reason == 'disconnect' || reason == 'left') {
+    if (reason == 'left') {
+      setState(() {
+        _phase = 'ended';
+        _status =
+            'Your anonymous partner left. Start again when you are ready.';
+      });
+      return;
+    }
+    if (reason == 'skipped' || reason == 'disconnect') {
       setState(() {
         _phase = 'searching';
       });
@@ -468,7 +506,11 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
       }
       final dataUrl = bytesToDataUrl(bytes, file.mimeType ?? 'image/jpeg');
       unawaited(
-        _sendStructuredMessage(type: 'image', imageUrl: dataUrl, text: file.name),
+        _sendStructuredMessage(
+          type: 'image',
+          imageUrl: dataUrl,
+          text: file.name,
+        ),
       );
       _scrollToBottom();
     } catch (_) {
@@ -518,7 +560,8 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     }
     try {
       final hasPermission = await _audioRecorder.hasPermission();
-      final allowed = hasPermission || await _permissionService.ensureMicrophone();
+      final allowed =
+          hasPermission || await _permissionService.ensureMicrophone();
       final recorderAllowed = allowed && await _audioRecorder.hasPermission();
       if (!recorderAllowed) {
         _showSnack('Microphone permission is required to record voice notes.');
@@ -712,7 +755,7 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
                 ListTile(
                   onTap: () {
                     Navigator.of(context).pop();
-                    _showSnack('Report received. We will review this session.');
+                    unawaited(_showReportSheet());
                   },
                   leading: const Icon(Icons.flag_outlined, color: Colors.white),
                   title: const Text(
@@ -726,6 +769,308 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
         );
       },
     );
+  }
+
+  Future<void> _showReportSheet() async {
+    final partnerId = _partnerId;
+    final matchId = _matchId;
+    if (partnerId == null ||
+        partnerId.trim().isEmpty ||
+        matchId == null ||
+        matchId.trim().isEmpty) {
+      _showSnack('There is no active anonymous session to report.');
+      return;
+    }
+
+    final reasonController = TextEditingController(text: 'Harassment or abuse');
+    final detailsController = TextEditingController();
+    final proofs = <_ReportProof>[];
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171717),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            Future<void> addProof(ImageSource source) async {
+              final allowed = source == ImageSource.camera
+                  ? await _permissionService.ensureCameraAndMicrophone()
+                  : await _permissionService.ensurePhotos();
+              if (!allowed) {
+                _showSnack('Photo permission is required for report proof.');
+                return;
+              }
+              final file = await _imagePicker.pickImage(
+                source: source,
+                maxWidth: 1400,
+                imageQuality: 72,
+              );
+              if (file == null) return;
+              final bytes = await file.readAsBytes();
+              if (bytes.isEmpty) return;
+              if (bytes.length > 1500000) {
+                _showSnack('Proof photo is too large. Choose a smaller image.');
+                return;
+              }
+              setSheetState(() {
+                proofs.add(
+                  _ReportProof(
+                    dataUrl: bytesToDataUrl(
+                      bytes,
+                      file.mimeType ?? 'image/jpeg',
+                    ),
+                    bytes: bytes,
+                    name: file.name,
+                    mimeType: file.mimeType ?? 'image/jpeg',
+                  ),
+                );
+              });
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 20,
+                  right: 20,
+                  top: 16,
+                  bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF4A4A4A),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Report anonymous session',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Reports go to the Talkflix moderation dashboard. Add photo proof so the team can review it properly.',
+                        style: TextStyle(color: Colors.white70, height: 1.35),
+                      ),
+                      const SizedBox(height: 18),
+                      DropdownButtonFormField<String>(
+                        initialValue: reasonController.text,
+                        dropdownColor: const Color(0xFF242424),
+                        decoration: const InputDecoration(
+                          labelText: 'Reason',
+                          labelStyle: TextStyle(color: Colors.white70),
+                        ),
+                        style: const TextStyle(color: Colors.white),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Harassment or abuse',
+                            child: Text('Harassment or abuse'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Sexual content',
+                            child: Text('Sexual content'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Hate or discrimination',
+                            child: Text('Hate or discrimination'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Scam or spam',
+                            child: Text('Scam or spam'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Underage safety concern',
+                            child: Text('Underage safety concern'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) reasonController.text = value;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: detailsController,
+                        minLines: 3,
+                        maxLines: 5,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'What happened?',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          hintText: 'Describe the violation or abuse.',
+                          hintStyle: TextStyle(color: Colors.white38),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: proofs.length >= 3
+                                  ? null
+                                  : () => addProof(ImageSource.camera),
+                              icon: const Icon(Icons.photo_camera_outlined),
+                              label: const Text('Camera'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: proofs.length >= 3
+                                  ? null
+                                  : () => addProof(ImageSource.gallery),
+                              icon: const Icon(Icons.photo_library_outlined),
+                              label: const Text('Gallery'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (proofs.isEmpty)
+                        const Text(
+                          'At least one proof photo is required.',
+                          style: TextStyle(color: Colors.white54),
+                        )
+                      else
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            for (var i = 0; i < proofs.length; i += 1)
+                              Stack(
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(14),
+                                    child: Image.memory(
+                                      proofs[i].bytes,
+                                      width: 72,
+                                      height: 72,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                  Positioned(
+                                    top: 2,
+                                    right: 2,
+                                    child: GestureDetector(
+                                      onTap: () => setSheetState(
+                                        () => proofs.removeAt(i),
+                                      ),
+                                      child: const CircleAvatar(
+                                        radius: 11,
+                                        backgroundColor: Colors.black87,
+                                        child: Icon(
+                                          Icons.close,
+                                          size: 14,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: _reportSubmitting
+                              ? null
+                              : () async {
+                                  if (proofs.isEmpty) {
+                                    _showSnack('Add at least one proof photo.');
+                                    return;
+                                  }
+                                  final submitted =
+                                      await _submitAnonymousReport(
+                                        matchId: matchId,
+                                        reportedUserId: partnerId,
+                                        reason: reasonController.text,
+                                        details: detailsController.text,
+                                        proofs: proofs,
+                                      );
+                                  if (submitted &&
+                                      mounted &&
+                                      sheetContext.mounted) {
+                                    Navigator.of(sheetContext).pop();
+                                  }
+                                },
+                          child: Text(
+                            _reportSubmitting
+                                ? 'Submitting...'
+                                : 'Submit report',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    reasonController.dispose();
+    detailsController.dispose();
+  }
+
+  Future<bool> _submitAnonymousReport({
+    required String matchId,
+    required String reportedUserId,
+    required String reason,
+    required String details,
+    required List<_ReportProof> proofs,
+  }) async {
+    if (_reportSubmitting) return false;
+    setState(() => _reportSubmitting = true);
+    try {
+      await ref
+          .read(apiClientProvider)
+          .postJson(
+            '/me/anonymous-reports',
+            body: <String, dynamic>{
+              'matchId': matchId,
+              'reportedUserId': reportedUserId,
+              'reason': reason.trim(),
+              'details': details.trim(),
+              'evidence': proofs
+                  .map(
+                    (proof) => <String, dynamic>{
+                      'name': proof.name,
+                      'mimeType': proof.mimeType,
+                      'dataUrl': proof.dataUrl,
+                    },
+                  )
+                  .toList(),
+            },
+          );
+      if (!mounted) return true;
+      _showSnack('Report submitted for moderator review.');
+      return true;
+    } catch (error) {
+      if (mounted) {
+        _showSnack('Could not submit report. Please try again.');
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _reportSubmitting = false);
+    }
   }
 
   Widget _buildAllowFollowToggle() {
@@ -862,6 +1207,7 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
       _callInitiator = true;
       _callIncoming = false;
       _callOpen = true;
+      _remoteAudioSeen = false;
       _status = 'Ringing...';
     });
     _startCallTimeout(
@@ -888,16 +1234,16 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
       _callAccepted = true;
       _callInitiator = false;
       _callOpen = true;
+      _remoteAudioSeen = false;
       _status = 'Connecting...';
     });
     final matchId = _matchId;
     if (matchId != null) {
       unawaited(
-        _socket.emitWithAckFuture(
-          'call:accept',
-          <String, dynamic>{'matchId': matchId, 'accept': true},
-          timeout: const Duration(seconds: 2),
-        ),
+        _socket.emitWithAckFuture('call:accept', <String, dynamic>{
+          'matchId': matchId,
+          'accept': true,
+        }, timeout: const Duration(seconds: 2)),
       );
     }
     _clearCallTimeout();
@@ -916,11 +1262,10 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     final matchId = _matchId;
     if (matchId != null) {
       unawaited(
-        _socket.emitWithAckFuture(
-          'call:accept',
-          <String, dynamic>{'matchId': matchId, 'accept': false},
-          timeout: const Duration(seconds: 2),
-        ),
+        _socket.emitWithAckFuture('call:accept', <String, dynamic>{
+          'matchId': matchId,
+          'accept': false,
+        }, timeout: const Duration(seconds: 2)),
       );
     }
     setState(() {
@@ -944,6 +1289,23 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     return _callPreparationFuture!;
   }
 
+  Future<Map<String, dynamic>> _resolveRtcPeerConnectionConfig() async {
+    final cached = _rtcPeerConnectionConfig;
+    if (cached != null) return cached;
+    try {
+      final rtcConfig = await ref
+          .read(directCallBackendServiceProvider)
+          .fetchRtcConfig();
+      final resolved = rtcConfig?.config ?? AppConfig.rtcPeerConnectionConfig;
+      _rtcPeerConnectionConfig = Map<String, dynamic>.from(resolved);
+    } catch (_) {
+      _rtcPeerConnectionConfig = Map<String, dynamic>.from(
+        AppConfig.rtcPeerConnectionConfig,
+      );
+    }
+    return _rtcPeerConnectionConfig!;
+  }
+
   Future<void> _prepareCall({required bool video}) async {
     final stream =
         _webRtc.localStream ??
@@ -951,9 +1313,13 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     _localRenderer.srcObject = stream;
     _localVideoEnabled = stream.getVideoTracks().any((track) => track.enabled);
     _micEnabled = stream.getAudioTracks().any((track) => track.enabled);
+    if (stream.getAudioTracks().isEmpty) {
+      throw StateError('Microphone did not provide an audio track.');
+    }
+    await Helper.setSpeakerphoneOn(_speakerOn);
     if (_peerConnection == null) {
       _peerConnection = await createPeerConnection(
-        AppConfig.rtcPeerConnectionConfig,
+        await _resolveRtcPeerConnectionConfig(),
       );
       _peerConnection!.onIceCandidate = (candidate) {
         if (_matchId == null || candidate.candidate == null) return;
@@ -966,8 +1332,26 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
         if (event.streams.isNotEmpty) {
           _remoteRenderer.srcObject = event.streams.first;
         }
+        if (event.track.kind == 'audio' && mounted) {
+          setState(() {
+            _remoteAudioSeen = true;
+            if (_callConnected) _status = 'Audio call';
+          });
+        }
         if (event.track.kind == 'video' && mounted) {
           setState(() => _remoteVideoEnabled = true);
+        }
+      };
+      _peerConnection!.onIceConnectionState = (state) {
+        if (!mounted) return;
+        if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+          setState(
+            () =>
+                _status = 'Call transport failed. Check network or try again.',
+          );
+        } else if (state ==
+            RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+          setState(() => _status = 'Connection interrupted...');
         }
       };
       _peerConnection!.onConnectionState = (state) {
@@ -978,7 +1362,16 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
             _callConnected = true;
             _callRequesting = false;
             _callOpen = true;
-            _status = 'Audio call';
+            _status = _remoteAudioSeen
+                ? 'Audio call'
+                : 'Connected. Waiting for partner audio...';
+          });
+          Timer(const Duration(seconds: 4), () {
+            if (!mounted || !_callConnected || _remoteAudioSeen) return;
+            setState(
+              () => _status =
+                  'Connected, but no remote audio track yet. Ask your partner to check microphone/network.',
+            );
           });
         } else if (state ==
             RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
@@ -1280,6 +1673,7 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
     _callPreparationFuture = null;
     _pendingRemoteCandidates.clear();
     _remoteDescriptionReady = false;
+    _remoteAudioSeen = false;
     _localRenderer.srcObject = null;
     _remoteRenderer.srcObject = null;
     await _webRtc.disposeLocalStream();
@@ -2274,9 +2668,19 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
                                     ),
                                     const SizedBox(width: 10),
                                     Container(
-                                        width: 46,
-                                        height: 46,
-                                        decoration: BoxDecoration(
+                                      width: 46,
+                                      height: 46,
+                                      decoration: BoxDecoration(
+                                        color:
+                                            _draftController.text
+                                                .trim()
+                                                .isNotEmpty
+                                            ? talkflixPrimary
+                                            : _pendingAudioUrl != null
+                                            ? talkflixPrimary
+                                            : chatSurfaceAlt,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
                                           color:
                                               _draftController.text
                                                   .trim()
@@ -2284,43 +2688,33 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
                                               ? talkflixPrimary
                                               : _pendingAudioUrl != null
                                               ? talkflixPrimary
-                                              : chatSurfaceAlt,
-                                          shape: BoxShape.circle,
-                                          border: Border.all(
-                                            color:
-                                                _draftController.text
-                                                    .trim()
-                                                    .isNotEmpty
-                                                ? talkflixPrimary
-                                                : _pendingAudioUrl != null
-                                                ? talkflixPrimary
-                                                : chatBorder,
-                                          ),
+                                              : chatBorder,
                                         ),
-                                        child: IconButton(
-                                          onPressed: _handleComposerPrimaryAction,
-                                          padding: EdgeInsets.zero,
-                                          icon: Icon(
-                                            _draftController.text
-                                                    .trim()
-                                                    .isNotEmpty
-                                                ? Icons.send_rounded
-                                                : _pendingAudioUrl != null
-                                                ? Icons.send_rounded
-                                                : _recording
-                                                ? Icons.stop_circle_outlined
-                                                : Icons.mic_none_outlined,
-                                            color:
-                                                _draftController.text
-                                                    .trim()
-                                                    .isNotEmpty
-                                                ? Colors.white
-                                                : _pendingAudioUrl != null
-                                                ? Colors.white
-                                                : headerText,
-                                            size: 22,
-                                          ),
+                                      ),
+                                      child: IconButton(
+                                        onPressed: _handleComposerPrimaryAction,
+                                        padding: EdgeInsets.zero,
+                                        icon: Icon(
+                                          _draftController.text
+                                                  .trim()
+                                                  .isNotEmpty
+                                              ? Icons.send_rounded
+                                              : _pendingAudioUrl != null
+                                              ? Icons.send_rounded
+                                              : _recording
+                                              ? Icons.stop_circle_outlined
+                                              : Icons.mic_none_outlined,
+                                          color:
+                                              _draftController.text
+                                                  .trim()
+                                                  .isNotEmpty
+                                              ? Colors.white
+                                              : _pendingAudioUrl != null
+                                              ? Colors.white
+                                              : headerText,
+                                          size: 22,
                                         ),
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -2420,6 +2814,20 @@ class _MeetAnonScreenState extends ConsumerState<MeetAnonScreen> {
   }
 }
 
+class _ReportProof {
+  const _ReportProof({
+    required this.dataUrl,
+    required this.bytes,
+    required this.name,
+    required this.mimeType,
+  });
+
+  final String dataUrl;
+  final Uint8List bytes;
+  final String name;
+  final String mimeType;
+}
+
 class _AnonMessage {
   _AnonMessage({
     required this.id,
@@ -2507,10 +2915,11 @@ class _AnonImageBubble extends StatelessWidget {
         Navigator.of(context).push(
           PageRouteBuilder<void>(
             opaque: false,
-            pageBuilder: (context, animation, secondaryAnimation) => _AnonFullscreenImageView(
-              provider: provider,
-              heroTag: message.id,
-            ),
+            pageBuilder: (context, animation, secondaryAnimation) =>
+                _AnonFullscreenImageView(
+                  provider: provider,
+                  heroTag: message.id,
+                ),
           ),
         );
       },
@@ -2678,10 +3087,7 @@ class _AnonCallOverlayState extends State<_AnonCallOverlay> {
   bool _primaryVideoRemote = true;
   bool _previewMoved = false;
 
-  VoidCallback? _withHaptic(
-    VoidCallback? action, {
-    bool strong = false,
-  }) {
+  VoidCallback? _withHaptic(VoidCallback? action, {bool strong = false}) {
     if (action == null) return null;
     return () {
       if (strong) {
@@ -2739,9 +3145,7 @@ class _AnonCallOverlayState extends State<_AnonCallOverlay> {
                           RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     )
                   : DecoratedBox(
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF111111),
-                      ),
+                      decoration: const BoxDecoration(color: Color(0xFF111111)),
                       child: Center(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -2761,9 +3165,7 @@ class _AnonCallOverlayState extends State<_AnonCallOverlay> {
                             const SizedBox(height: 18),
                             Text(
                               'Anonymous',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .headlineSmall
+                              style: Theme.of(context).textTheme.headlineSmall
                                   ?.copyWith(
                                     color: Colors.white,
                                     fontWeight: FontWeight.w800,
@@ -2785,9 +3187,7 @@ class _AnonCallOverlayState extends State<_AnonCallOverlay> {
                                           ? 'Connected'
                                           : 'Calling'),
                                 ),
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
+                                style: Theme.of(context).textTheme.titleMedium
                                     ?.copyWith(color: Colors.white70),
                               ),
                             ),
@@ -2990,7 +3390,7 @@ class _AnonCallOverlayState extends State<_AnonCallOverlay> {
                                   foregroundColor: Colors.white,
                                 ),
                                 onPressed: _withHaptic(widget.onClose),
-                                icon: const Icon(Icons.chat_bubble_outline_rounded),
+                                icon: const Icon(TalkflixIcons.talks),
                               ),
                               IconButton.filledTonal(
                                 style: IconButton.styleFrom(

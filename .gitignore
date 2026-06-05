@@ -33,6 +33,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/generated_docs/
 
 # Symbolication related
 app.*.symbols
@@ -57,3 +58,6 @@ GoogleService-Info.plist
 *.keystore
 /android/key.properties
 /android/upload-keystore.jks
+
+# Local one-off server exploration scripts
+/explore_server.command

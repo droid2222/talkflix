@@ -9,10 +9,7 @@ void main() {
       const base = SignupState(step: SignupStep.account);
       expect(base.canContinue, isFalse);
 
-      final partial = base.copyWith(
-        email: 'a@b.com',
-        password: '123456',
-      );
+      final partial = base.copyWith(email: 'a@b.com', password: '123456');
       expect(partial.canContinue, isFalse);
 
       final ready = partial.copyWith(

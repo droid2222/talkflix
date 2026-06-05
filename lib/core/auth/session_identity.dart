@@ -1,14 +1,9 @@
 import 'dart:convert';
 
 class SessionIdentity {
-  const SessionIdentity({
-    required this.userId,
-    required this.sessionId,
-  });
+  const SessionIdentity({required this.userId, required this.sessionId});
 
-  const SessionIdentity.empty()
-    : userId = '',
-      sessionId = '';
+  const SessionIdentity.empty() : userId = '', sessionId = '';
 
   final String userId;
   final String sessionId;

@@ -33,13 +33,44 @@ void main() {
 
     test('type getters work correctly', () {
       expect(
-          AppNotification.fromJson({'type': 'message'}).isMessageType, isTrue);
+        AppNotification.fromJson({'type': 'message'}).isMessageType,
+        isTrue,
+      );
       expect(
-          AppNotification.fromJson({'type': 'follow'}).isFollowType, isTrue);
+        AppNotification.fromJson({'type': 'direct_message'}).isMessageType,
+        isTrue,
+      );
+      expect(AppNotification.fromJson({'type': 'follow'}).isFollowType, isTrue);
       expect(
-          AppNotification.fromJson({'type': 'system'}).isSystemType, isTrue);
+        AppNotification.fromJson({'type': 'new_follower'}).isFollowType,
+        isTrue,
+      );
+      expect(AppNotification.fromJson({'type': 'system'}).isSystemType, isTrue);
       expect(
-          AppNotification.fromJson({'type': 'follow'}).isMessageType, isFalse);
+        AppNotification.fromJson({'type': 'follow'}).isMessageType,
+        isFalse,
+      );
+    });
+
+    test('notification center hides direct message event types', () {
+      expect(
+        AppNotification.fromJson({
+          'type': 'direct_message',
+        }).isNotificationCenterVisible,
+        isFalse,
+      );
+      expect(
+        AppNotification.fromJson({
+          'type': 'chat_message',
+        }).isNotificationCenterVisible,
+        isFalse,
+      );
+      expect(
+        AppNotification.fromJson({
+          'type': 'follow',
+        }).isNotificationCenterVisible,
+        isTrue,
+      );
     });
 
     test('handles int createdAt', () {

@@ -7,24 +7,29 @@ final meetFiltersProvider =
     StateNotifierProvider<MeetFiltersController, MeetFiltersState>((ref) {
       final session = ref.watch(sessionControllerProvider);
       final user = session.user;
+      final isProLike = user?.isProLike == true;
+      final learnLanguage = (user?.learnLanguage ?? '').trim();
       final availableLanguages = <String>{
-        'Any',
-        if ((user?.learnLanguage ?? '').isNotEmpty) user!.learnLanguage,
-        ...?user?.meetLanguages,
-      }.toList();
+        if (isProLike) 'Any',
+        if (learnLanguage.isNotEmpty) learnLanguage,
+        if (isProLike) ...?user?.meetLanguages,
+      }.where((item) => item.trim().isNotEmpty).toList();
 
-      final initialLanguage = availableLanguages.isNotEmpty
-          ? availableLanguages.first
-          : 'Any';
+      final initialLanguage = learnLanguage.isNotEmpty
+          ? learnLanguage
+          : (availableLanguages.isNotEmpty ? availableLanguages.first : 'Any');
 
       return MeetFiltersController(
         MeetFiltersState(
           selectedNativeLanguage: initialLanguage,
           selectedLearningLanguage: 'Any',
           availableLanguages: availableLanguages,
+          discoveryMode: MeetDiscoveryMode.random,
         ),
       );
     });
+
+enum MeetDiscoveryMode { random, nearby }
 
 class MeetFiltersController extends StateNotifier<MeetFiltersState> {
   MeetFiltersController(super.state);
@@ -37,16 +42,16 @@ class MeetFiltersController extends StateNotifier<MeetFiltersState> {
     final trimmed = value.trim();
     if (trimmed.isEmpty || trimmed == 'Any') return;
 
-    final updated = <String>{
-      'Any',
-      ...state.availableLanguages.where((item) => item != 'Any'),
-      trimmed,
-    }.toList()
-      ..sort((a, b) {
-        if (a == 'Any') return -1;
-        if (b == 'Any') return 1;
-        return a.toLowerCase().compareTo(b.toLowerCase());
-      });
+    final updated =
+        <String>{
+          'Any',
+          ...state.availableLanguages.where((item) => item != 'Any'),
+          trimmed,
+        }.toList()..sort((a, b) {
+          if (a == 'Any') return -1;
+          if (b == 'Any') return 1;
+          return a.toLowerCase().compareTo(b.toLowerCase());
+        });
 
     state = state.copyWith(
       availableLanguages: updated,
@@ -68,6 +73,10 @@ class MeetFiltersController extends StateNotifier<MeetFiltersState> {
 
   void setUseProSearch(bool value) {
     state = state.copyWith(useProSearch: value);
+  }
+
+  void setDiscoveryMode(MeetDiscoveryMode value) {
+    state = state.copyWith(discoveryMode: value);
   }
 
   void selectGender(String value) {
@@ -103,6 +112,7 @@ class MeetFiltersController extends StateNotifier<MeetFiltersState> {
       newUsersOnly: false,
       prioritizeNearby: false,
       useProSearch: false,
+      discoveryMode: MeetDiscoveryMode.random,
     );
   }
 }
@@ -120,6 +130,7 @@ class MeetFiltersState {
     this.newUsersOnly = false,
     this.prioritizeNearby = false,
     this.useProSearch = false,
+    this.discoveryMode = MeetDiscoveryMode.random,
   });
 
   final String selectedNativeLanguage;
@@ -133,6 +144,7 @@ class MeetFiltersState {
   final bool newUsersOnly;
   final bool prioritizeNearby;
   final bool useProSearch;
+  final MeetDiscoveryMode discoveryMode;
 
   MeetFiltersState copyWith({
     String? selectedNativeLanguage,
@@ -146,6 +158,7 @@ class MeetFiltersState {
     bool? newUsersOnly,
     bool? prioritizeNearby,
     bool? useProSearch,
+    MeetDiscoveryMode? discoveryMode,
   }) {
     return MeetFiltersState(
       selectedNativeLanguage:
@@ -161,6 +174,7 @@ class MeetFiltersState {
       newUsersOnly: newUsersOnly ?? this.newUsersOnly,
       prioritizeNearby: prioritizeNearby ?? this.prioritizeNearby,
       useProSearch: useProSearch ?? this.useProSearch,
+      discoveryMode: discoveryMode ?? this.discoveryMode,
     );
   }
 }

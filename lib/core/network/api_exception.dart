@@ -8,13 +8,13 @@ class ApiException implements Exception {
 
   bool get isClientError =>
       statusCode != null && statusCode! >= 400 && statusCode! < 500;
-  bool get isServerError =>
-      statusCode != null && statusCode! >= 500;
+  bool get isServerError => statusCode != null && statusCode! >= 500;
   bool get isUnauthorized => statusCode == 401;
   bool get isForbidden => statusCode == 403;
   bool get isNotFound => statusCode == 404;
   bool get isConflict => statusCode == 409;
   bool get isRateLimited => statusCode == 429;
+  bool get isServiceUnavailable => statusCode == 503;
 
   @override
   String toString() => 'ApiException($statusCode): $message';
@@ -23,7 +23,7 @@ class ApiException implements Exception {
 /// Thrown when a network-level failure occurs (no response received).
 class NetworkException extends ApiException {
   const NetworkException(super.message, {super.cause})
-      : super(statusCode: null);
+    : super(statusCode: null);
 
   @override
   String toString() => 'NetworkException: $message';
@@ -32,7 +32,7 @@ class NetworkException extends ApiException {
 /// Thrown when a request times out.
 class TimeoutException extends ApiException {
   const TimeoutException([super.message = 'Request timed out'])
-      : super(statusCode: null);
+    : super(statusCode: null);
 
   @override
   String toString() => 'TimeoutException: $message';
@@ -57,6 +57,9 @@ String userFriendlyMessage(ApiException error) {
   }
   if (error.isRateLimited) {
     return 'Too many requests. Please wait a moment and try again.';
+  }
+  if (error.isServiceUnavailable) {
+    return 'We\'re still setting this up. Check back soon!';
   }
   if (error.isServerError) {
     return 'Something went wrong on our end. Please try again later.';

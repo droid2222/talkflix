@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/localization/talkflix_localizations.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/storage_keys.dart';
@@ -50,13 +51,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _submit() async {
     final email = _emailController.text.trim();
     final password = _passwordController.text;
+    final l10n = context.l10n;
 
     if (email.isEmpty) {
-      setState(() => _error = 'Please enter your email.');
+      setState(() => _error = l10n.pleaseEnterEmail);
       return;
     }
     if (password.trim().isEmpty) {
-      setState(() => _error = 'Please enter your password.');
+      setState(() => _error = l10n.pleaseEnterPassword);
       return;
     }
 
@@ -84,9 +86,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       setState(() => _error = error.message);
     } catch (_) {
       if (!mounted) return;
-      setState(
-        () => _error = 'We could not sign you in right now. Please try again.',
-      );
+      setState(() => _error = l10n.signInFailed);
     } finally {
       if (mounted) {
         setState(() => _submitting = false);
@@ -96,13 +96,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final theme = Theme.of(context);
 
     return AuthShell(
-      brandPanel: const AuthBrandPanel(
-        title: 'Talkflix',
-        copy:
-            'Connect with people worldwide, practice languages naturally, and continue your conversations across chat, voice, and video.',
+      brandPanel: AuthBrandPanel(
+        title: l10n.appTitle,
+        copy: l10n.authBrandCopy,
       ),
       cardChild: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -112,7 +112,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             child: Column(
               children: [
                 Text(
-                  'Welcome back',
+                  l10n.welcomeBack,
                   textAlign: TextAlign.center,
                   style: theme.textTheme.headlineSmall?.copyWith(
                     fontSize: 28.8,
@@ -121,7 +121,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Sign in to continue your chats and matches.',
+                  l10n.signInSubtitle,
                   textAlign: TextAlign.center,
                   style: theme.textTheme.bodyMedium?.copyWith(
                     fontSize: 15.2,
@@ -135,13 +135,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           _AuthInput(
             controller: _emailController,
             keyboardType: TextInputType.emailAddress,
-            hintText: 'Email',
+            hintText: l10n.email,
           ),
           const SizedBox(height: 14),
           _AuthInput(
             controller: _passwordController,
             obscureText: true,
-            hintText: 'Password',
+            hintText: l10n.password,
           ),
           const SizedBox(height: 14),
           Row(
@@ -157,7 +157,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           setState(() => _remember = value ?? false),
                     ),
                     Text(
-                      'Remember email',
+                      l10n.rememberEmail,
                       style: theme.textTheme.bodySmall?.copyWith(fontSize: 14),
                     ),
                   ],
@@ -171,7 +171,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                child: const Text('Forgot password?'),
+                child: Text(l10n.forgotPassword),
               ),
             ],
           ),
@@ -202,7 +202,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
                 textStyle: const TextStyle(fontWeight: FontWeight.w800),
               ),
-              child: Text(_submitting ? 'Signing in...' : 'Sign In'),
+              child: Text(_submitting ? l10n.signingIn : l10n.signIn),
             ),
           ),
           const SizedBox(height: 19),
@@ -211,7 +211,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Text(
-                  'New here? ',
+                  '${l10n.newHere} ',
                   style: theme.textTheme.bodySmall?.copyWith(
                     fontSize: 14.4,
                     color: theme.colorScheme.onSurfaceVariant,
@@ -225,7 +225,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  child: const Text('Create an account'),
+                  child: Text(l10n.createAccount),
                 ),
               ],
             ),

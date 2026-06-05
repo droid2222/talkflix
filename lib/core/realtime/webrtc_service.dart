@@ -12,9 +12,11 @@ class WebRtcService {
 
   MediaStream? get localStream => _localStream;
 
-  bool get hasAudioTrack => (_localStream?.getAudioTracks().isNotEmpty ?? false);
+  bool get hasAudioTrack =>
+      (_localStream?.getAudioTracks().isNotEmpty ?? false);
 
-  bool get hasVideoTrack => (_localStream?.getVideoTracks().isNotEmpty ?? false);
+  bool get hasVideoTrack =>
+      (_localStream?.getVideoTracks().isNotEmpty ?? false);
 
   bool get isMicrophoneEnabled =>
       _localStream?.getAudioTracks().any((track) => track.enabled) ?? false;

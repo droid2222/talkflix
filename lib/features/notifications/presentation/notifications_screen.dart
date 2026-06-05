@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/widgets/app_avatar.dart';
 import '../data/app_notification.dart';
@@ -24,6 +25,12 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
       appBar: AppBar(
         title: const Text('Notifications'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.tune_rounded),
+            tooltip: 'Notification preferences',
+            onPressed: () =>
+                context.push('/app/profile/settings/notifications'),
+          ),
           if (state.unreadCount > 0)
             IconButton(
               icon: const Icon(Icons.done_all_rounded),
@@ -96,13 +103,10 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
                 color: scheme.onSurfaceVariant,
               ),
               const SizedBox(height: 16),
-              Text(
-                'No notifications yet',
-                style: theme.textTheme.titleMedium,
-              ),
+              Text('No notifications yet', style: theme.textTheme.titleMedium),
               const SizedBox(height: 8),
               Text(
-                'When someone follows you, sends a message, or mentions you, it will show up here.',
+                'When someone follows you, mentions you, or interacts with your content, it will show up here.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: scheme.onSurfaceVariant,
@@ -120,11 +124,8 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
       child: ListView.separated(
         physics: const AlwaysScrollableScrollPhysics(),
         itemCount: state.notifications.length,
-        separatorBuilder: (_, _) => Divider(
-          height: 1,
-          indent: 72,
-          color: scheme.outlineVariant,
-        ),
+        separatorBuilder: (_, _) =>
+            Divider(height: 1, indent: 72, color: scheme.outlineVariant),
         itemBuilder: (context, index) {
           final notification = state.notifications[index];
           return _NotificationTile(notification: notification);
@@ -145,11 +146,16 @@ class _NotificationTile extends ConsumerWidget {
     final scheme = theme.colorScheme;
 
     return InkWell(
-      onTap: () {
+      onTap: () async {
         if (!notification.isRead) {
-          ref
+          await ref
               .read(notificationsControllerProvider.notifier)
               .markAsRead(notification.id);
+        }
+        if (!context.mounted) return;
+        final route = notification.resolvedRoute;
+        if (route.isNotEmpty) {
+          await context.push(route);
         }
       },
       child: Container(

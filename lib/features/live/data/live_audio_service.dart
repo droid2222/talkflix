@@ -1,6 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:livekit_client/livekit_client.dart';
+
+final liveAudioServiceProvider = Provider<LiveAudioService>((ref) {
+  return LiveAudioService();
+});
 
 class LiveAudioService {
   Room? _room;
@@ -10,6 +15,7 @@ class LiveAudioService {
 
   bool get isConnected => _room?.connectionState == ConnectionState.connected;
   bool get canPublish => _canPublish;
+  bool get canPlaybackAudio => _room?.canPlaybackAudio ?? false;
   bool isConnectedToRoom(String roomName) =>
       isConnected && _connectedRoomName == roomName;
   Set<String> get activeSpeakerIds {
@@ -68,7 +74,20 @@ class LiveAudioService {
     _canPublish = canPublish;
     _connectedRoomName = roomName;
     _lastAppliedMicEnabled = room.localParticipant?.isMicrophoneEnabled();
+    await startPlayback();
     await setPublishing(canPublish);
+  }
+
+  Future<bool> startPlayback() async {
+    final room = _room;
+    if (room == null || room.connectionState != ConnectionState.connected) {
+      return false;
+    }
+    if (room.canPlaybackAudio) {
+      return true;
+    }
+    await room.startAudio();
+    return room.canPlaybackAudio;
   }
 
   Future<void> setPublishing(bool enabled) async {

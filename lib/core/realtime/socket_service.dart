@@ -21,6 +21,7 @@ class SocketService extends ChangeNotifier {
   String _status = 'disconnected';
   int _connectionGeneration = 0;
   Completer<bool>? _identityReadyCompleter;
+  bool _guestPreviewMode = false;
 
   String get status => _status;
   bool get isConnected =>
@@ -33,6 +34,7 @@ class SocketService extends ChangeNotifier {
   String? get authenticatedUserId => _authenticatedUserId;
   String? get authenticatedSessionId => _authenticatedSessionId;
   String? get lastIdentityError => _lastIdentityError;
+  bool get isGuestPreviewMode => _guestPreviewMode;
 
   void connect(
     String token, {
@@ -54,6 +56,7 @@ class SocketService extends ChangeNotifier {
 
     _disposeSocket();
 
+    _guestPreviewMode = false;
     _token = token;
     _expectedUserId = expectedUserId;
     _expectedSessionId = expectedSessionId;
@@ -166,6 +169,97 @@ class SocketService extends ChangeNotifier {
     notifyListeners();
   }
 
+  void connectGuestLivePreview({required String broadcastId}) {
+    final normalizedBroadcastId = broadcastId.trim();
+    if (normalizedBroadcastId.isEmpty) return;
+    if (_socket != null &&
+        _guestPreviewMode &&
+        (_status == 'connecting' ||
+            _status == 'authenticating' ||
+            isConnected)) {
+      return;
+    }
+
+    _disposeSocket();
+
+    _guestPreviewMode = true;
+    _token = null;
+    _expectedUserId = null;
+    _expectedSessionId = 'guest-preview';
+    _authenticatedUserId = null;
+    _authenticatedSessionId = null;
+    _lastIdentityError = null;
+    _identityReadyCompleter = Completer<bool>();
+    final generation = ++_connectionGeneration;
+
+    _socket = io.io(AppConfig.apiBaseUrl, <String, dynamic>{
+      'path': '/socket.io',
+      'transports': ['websocket', 'polling'],
+      'autoConnect': false,
+      'forceNew': true,
+      'multiplex': false,
+      'reconnection': false,
+      'timeout': 8000,
+      'auth': <String, dynamic>{
+        'guest': 'live_preview',
+        'broadcastId': normalizedBroadcastId,
+      },
+    });
+
+    _socket!
+      ..onConnect((_) {
+        if (!_isCurrentGeneration(generation)) return;
+        _status = 'authenticating';
+        notifyListeners();
+      })
+      ..on('auth:ready', (dynamic payload) {
+        if (!_isCurrentGeneration(generation)) return;
+        final data = payload is Map
+            ? Map<String, dynamic>.from(payload)
+            : const <String, dynamic>{};
+        final actualUserId = '${data['userId'] ?? ''}'.trim();
+        final actualSessionId = '${data['sessionId'] ?? ''}'.trim();
+        final acceptedGuest =
+            data['guest'] == true &&
+            actualUserId.startsWith('guest_') &&
+            actualSessionId == 'guest-preview';
+        if (!acceptedGuest) {
+          _lastIdentityError = 'Guest preview could not be opened.';
+          _status = 'error';
+          _completeIdentityReady(false);
+          notifyListeners();
+          _disposeSocket();
+          return;
+        }
+        _authenticatedUserId = actualUserId;
+        _authenticatedSessionId = actualSessionId;
+        _lastIdentityError = null;
+        _status = 'connected';
+        _completeIdentityReady(true);
+        notifyListeners();
+      })
+      ..onDisconnect((_) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
+        _status = 'disconnected';
+        _completeIdentityReady(false);
+        notifyListeners();
+      })
+      ..onConnectError((dynamic _) {
+        if (!_isCurrentGeneration(generation)) return;
+        _authenticatedUserId = null;
+        _authenticatedSessionId = null;
+        _status = 'error';
+        _completeIdentityReady(false);
+        notifyListeners();
+      })
+      ..connect();
+
+    _status = 'connecting';
+    notifyListeners();
+  }
+
   Future<bool> ensureSessionIdentity({
     required String token,
     required String expectedUserId,
@@ -177,10 +271,7 @@ class SocketService extends ChangeNotifier {
       expectedUserId: expectedUserId,
       expectedSessionId: expectedSessionId,
     );
-    if (isVerifiedFor(
-      userId: expectedUserId,
-      sessionId: expectedSessionId,
-    )) {
+    if (isVerifiedFor(userId: expectedUserId, sessionId: expectedSessionId)) {
       return true;
     }
     final completer = _identityReadyCompleter;
@@ -192,10 +283,7 @@ class SocketService extends ChangeNotifier {
     }
   }
 
-  bool isVerifiedFor({
-    required String userId,
-    required String sessionId,
-  }) {
+  bool isVerifiedFor({required String userId, required String sessionId}) {
     if (!isConnected) return false;
     return _authenticatedUserId == userId &&
         _authenticatedSessionId == sessionId;
@@ -209,6 +297,7 @@ class SocketService extends ChangeNotifier {
     _authenticatedUserId = null;
     _authenticatedSessionId = null;
     _lastIdentityError = null;
+    _guestPreviewMode = false;
     _status = 'disconnected';
     _completeIdentityReady(false);
     notifyListeners();
@@ -232,10 +321,7 @@ class SocketService extends ChangeNotifier {
         if (!completer.isCompleted) completer.complete(payload);
       },
     );
-    return completer.future.timeout(
-      timeout,
-      onTimeout: () => null,
-    );
+    return completer.future.timeout(timeout, onTimeout: () => null);
   }
 
   Future<dynamic> emitWithAckRetry(

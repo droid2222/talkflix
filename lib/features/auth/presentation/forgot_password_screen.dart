@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/localization/talkflix_localizations.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/network/api_exception.dart';
 import '../data/auth_repository.dart';
@@ -28,6 +29,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
   }
 
   Future<void> _submit() async {
+    final l10n = context.l10n;
     setState(() {
       _sending = true;
       _error = null;
@@ -39,15 +41,12 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
           .read(authRepositoryProvider)
           .forgotPassword(_emailController.text);
       setState(() {
-        _message = 'If that email exists, a reset link has been sent.';
+        _message = l10n.resetLinkSent;
       });
     } on ApiException catch (error) {
       setState(() => _error = error.message);
     } catch (_) {
-      setState(
-        () => _error =
-            'We could not send the reset link right now. Please try again.',
-      );
+      setState(() => _error = l10n.sendResetLinkFailed);
     } finally {
       if (mounted) {
         setState(() => _sending = false);
@@ -57,6 +56,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final theme = Theme.of(context);
 
     return AuthShell(
@@ -67,14 +67,14 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Forgot password',
+            l10n.forgotPasswordTitle,
             style: theme.textTheme.headlineSmall?.copyWith(
               fontWeight: FontWeight.w900,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Enter your email and we’ll send you a reset link.',
+            l10n.forgotPasswordSubtitle,
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -83,7 +83,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
           TextField(
             controller: _emailController,
             keyboardType: TextInputType.emailAddress,
-            decoration: const InputDecoration(hintText: 'Email'),
+            decoration: InputDecoration(hintText: l10n.email),
           ),
           const SizedBox(height: 14),
           SizedBox(
@@ -93,7 +93,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(50),
               ),
-              child: Text(_sending ? 'Sending...' : 'Send reset link'),
+              child: Text(_sending ? l10n.sending : l10n.sendResetLink),
             ),
           ),
           if (_error != null) ...[
@@ -133,7 +133,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: const Text('Back to login'),
+              child: Text(l10n.backToLogin),
             ),
           ),
         ],

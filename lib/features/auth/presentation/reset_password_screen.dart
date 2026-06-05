@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/localization/talkflix_localizations.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/network/api_exception.dart';
 import '../data/auth_repository.dart';
@@ -30,13 +31,14 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
   }
 
   Future<void> _submit() async {
+    final l10n = context.l10n;
     final token = widget.token;
     if (token == null || token.isEmpty) {
-      setState(() => _error = 'Missing token.');
+      setState(() => _error = l10n.missingToken);
       return;
     }
     if (_passwordController.text.trim().length < 6) {
-      setState(() => _error = 'Password must be at least 6 characters.');
+      setState(() => _error = l10n.passwordMinSix);
       return;
     }
 
@@ -50,14 +52,11 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
       await ref
           .read(authRepositoryProvider)
           .resetPassword(token: token, password: _passwordController.text);
-      setState(() => _message = 'Password reset. You can login now.');
+      setState(() => _message = l10n.passwordResetSuccess);
     } on ApiException catch (error) {
       setState(() => _error = error.message);
     } catch (_) {
-      setState(
-        () => _error =
-            'We could not reset your password right now. Please try again.',
-      );
+      setState(() => _error = l10n.resetPasswordFailed);
     } finally {
       if (mounted) {
         setState(() => _submitting = false);
@@ -67,6 +66,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final theme = Theme.of(context);
     final token = widget.token ?? '';
 
@@ -78,7 +78,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Reset password',
+            l10n.resetPasswordTitle,
             style: theme.textTheme.headlineSmall?.copyWith(
               fontWeight: FontWeight.w900,
             ),
@@ -86,7 +86,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
           const SizedBox(height: 8),
           if (token.isEmpty)
             Text(
-              'Missing token.',
+              l10n.missingToken,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -95,9 +95,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
             TextField(
               controller: _passwordController,
               obscureText: true,
-              decoration: const InputDecoration(
-                hintText: 'New password (min 6)',
-              ),
+              decoration: InputDecoration(hintText: l10n.newPasswordMinSix),
             ),
             const SizedBox(height: 14),
             SizedBox(
@@ -108,7 +106,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
                   minimumSize: const Size.fromHeight(50),
                 ),
                 child: Text(
-                  _submitting ? 'Resetting password...' : 'Set new password',
+                  _submitting ? l10n.resettingPassword : l10n.setNewPassword,
                 ),
               ),
             ),
@@ -150,7 +148,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: const Text('Back to login'),
+              child: Text(l10n.backToLogin),
             ),
           ),
         ],

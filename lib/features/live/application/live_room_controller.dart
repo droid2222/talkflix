@@ -98,9 +98,7 @@ class LiveRoomController extends StateNotifier<LiveRoomState> {
     );
     if (selfSpeaker.isEmpty) return LiveStageState.listener;
     final muted = selfSpeaker['muted'] == true || !localMicEnabled;
-    return muted
-        ? LiveStageState.speakerMuted
-        : LiveStageState.speakerUnmuted;
+    return muted ? LiveStageState.speakerMuted : LiveStageState.speakerUnmuted;
   }
 
   String _resolveHostUserId(Map<String, dynamic> room) {
@@ -110,7 +108,8 @@ class LiveRoomController extends StateNotifier<LiveRoomState> {
     if (hostId.isNotEmpty) return hostId;
     final ownerId = '${room['ownerUserId'] ?? room['ownerId'] ?? ''}'.trim();
     if (ownerId.isNotEmpty) return ownerId;
-    final createdBy = '${room['createdBy'] ?? room['createdByUserId'] ?? ''}'.trim();
+    final createdBy = '${room['createdBy'] ?? room['createdByUserId'] ?? ''}'
+        .trim();
     if (createdBy.isNotEmpty) return createdBy;
     final host = room['host'];
     if (host is Map) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,24 +11,25 @@ import '../../auth/data/signup_options.dart';
 import '../../upgrade/presentation/pro_access_sheet.dart';
 import 'meet_filters_controller.dart';
 
-final meetCitiesProvider =
-    FutureProvider.family<List<String>, String>((ref, country) async {
-      if (country.isEmpty || country == 'Any') {
-        return const ['Any'];
-      }
+final meetCitiesProvider = FutureProvider.family<List<String>, String>((
+  ref,
+  country,
+) async {
+  if (country.isEmpty || country == 'Any') {
+    return const ['Any'];
+  }
 
-      final data = await ref.read(apiClientProvider).getJson(
-        '/meta/cities',
-        queryParameters: {'country': country},
-      );
+  final data = await ref
+      .read(apiClientProvider)
+      .getJson('/meta/cities', queryParameters: {'country': country});
 
-      final cities = (data['cities'] as List<dynamic>? ?? const [])
-          .map((item) => item.toString())
-          .where((item) => item.trim().isNotEmpty)
-          .toList();
+  final cities = (data['cities'] as List<dynamic>? ?? const [])
+      .map((item) => item.toString())
+      .where((item) => item.trim().isNotEmpty)
+      .toList();
 
-      return ['Any', ...cities];
-    });
+  return ['Any', ...cities];
+});
 
 class MeetFiltersScreen extends ConsumerStatefulWidget {
   const MeetFiltersScreen({super.key});
@@ -40,6 +43,7 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
   late String _selectedLearningLanguage;
   late String _selectedCountry;
   late String _selectedCity;
+  late MeetDiscoveryMode _discoveryMode;
   RangeValues _ageRange = const RangeValues(18, 90);
   bool _newUsers = false;
   bool _prioritizeNearby = false;
@@ -55,7 +59,11 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
     _selectedLearningLanguage = filters.selectedLearningLanguage;
     _selectedCountry = filters.selectedCountry;
     _selectedCity = filters.selectedCity;
-    _ageRange = RangeValues(filters.minAge.toDouble(), filters.maxAge.toDouble());
+    _discoveryMode = filters.discoveryMode;
+    _ageRange = RangeValues(
+      filters.minAge.toDouble(),
+      filters.maxAge.toDouble(),
+    );
     _newUsers = filters.newUsersOnly;
     _prioritizeNearby = filters.prioritizeNearby;
     _gender = filters.selectedGender;
@@ -119,6 +127,7 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
       _selectedLearningLanguage = 'Any';
       _selectedCountry = 'Any';
       _selectedCity = 'Any';
+      _discoveryMode = MeetDiscoveryMode.random;
       _ageRange = const RangeValues(18, 90);
       _newUsers = false;
       _prioritizeNearby = false;
@@ -127,17 +136,30 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
   }
 
   void _apply(MeetFiltersController controller, bool isProLike) {
-    controller.selectNativeLanguage(_selectedNativeLanguage);
-    controller.selectLearningLanguage(_selectedLearningLanguage);
-    controller.selectCountry(_selectedCountry);
-    controller.selectCity(_selectedCity);
-    controller.selectGender(_gender);
+    final learningLanguage = ref
+        .read(sessionControllerProvider)
+        .user
+        ?.learnLanguage
+        .trim();
+    controller.selectNativeLanguage(
+      isProLike ? _selectedNativeLanguage : (learningLanguage ?? 'Any'),
+    );
+    controller.selectLearningLanguage(
+      isProLike ? _selectedLearningLanguage : 'Any',
+    );
+    controller.selectCountry(isProLike ? _selectedCountry : 'Any');
+    controller.selectCity(isProLike ? _selectedCity : 'Any');
+    controller.selectGender(isProLike ? _gender : 'all');
     controller.selectAgeRange(_ageRange);
     controller.setNewUsers(_newUsers);
-    controller.setPrioritizeNearby(_prioritizeNearby);
+    controller.setPrioritizeNearby(isProLike && _prioritizeNearby);
+    controller.setDiscoveryMode(
+      isProLike ? _discoveryMode : MeetDiscoveryMode.random,
+    );
     controller.setUseProSearch(
       isProLike &&
-          (_selectedCountry != 'Any' ||
+          (_discoveryMode == MeetDiscoveryMode.nearby ||
+              _selectedCountry != 'Any' ||
               _selectedCity != 'Any' ||
               _prioritizeNearby ||
               _gender != 'all'),
@@ -160,7 +182,14 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
     final theme = Theme.of(context);
     const accent = talkflixPrimary;
     final isProLike = session.user?.isProLike == true;
-    final countryNames = ['Any', ...countryOptions.map((item) => item['label']!)];
+    final learningLanguage = (session.user?.learnLanguage ?? '').trim();
+    final languageOptionsForPlan = isProLike
+        ? _languageOptions
+        : [if (learningLanguage.isNotEmpty) learningLanguage];
+    final countryNames = [
+      'Any',
+      ...countryOptions.map((item) => item['label']!),
+    ];
     final sliderTheme = SliderTheme.of(context).copyWith(
       activeTrackColor: accent,
       inactiveTrackColor: accent.withValues(alpha: 0.18),
@@ -199,36 +228,81 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 92),
               children: [
                 _FilterCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'Discovery',
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          if (!isProLike) ...[
+                            const SizedBox(width: 8),
+                            const ProFeatureBadge(compact: true),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      _DiscoveryModePicker(
+                        selected: _discoveryMode,
+                        proUnlocked: isProLike,
+                        onSelected: (mode) {
+                          if (mode == MeetDiscoveryMode.nearby && !isProLike) {
+                            unawaited(_showProGate());
+                            return;
+                          }
+                          setState(() => _discoveryMode = mode);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _FilterCard(
                   child: _SelectionRow(
-                    label: "Language partner's native language",
-                    value: _selectedNativeLanguage,
+                    label: isProLike
+                        ? "Language partner's native language"
+                        : 'Free search language',
+                    value: isProLike
+                        ? _selectedNativeLanguage
+                        : (learningLanguage.isEmpty ? 'Any' : learningLanguage),
                     accent: accent,
                     compact: true,
-                    onTap: () => _pickValue(
-                      title: "Language partner's native language",
-                      options: _languageOptions,
-                      currentValue: _selectedNativeLanguage,
-                      searchHint: 'Search language',
-                      onSelected: (value) =>
-                          setState(() => _selectedNativeLanguage = value),
-                    ),
+                    locked: !isProLike,
+                    onTap: isProLike
+                        ? () => _pickValue(
+                            title: "Language partner's native language",
+                            options: languageOptionsForPlan,
+                            currentValue: _selectedNativeLanguage,
+                            searchHint: 'Search language',
+                            onSelected: (value) =>
+                                setState(() => _selectedNativeLanguage = value),
+                          )
+                        : _showProGate,
                   ),
                 ),
                 const SizedBox(height: 12),
                 _FilterCard(
                   child: _SelectionRow(
                     label: "Language partner's learning language",
-                    value: _selectedLearningLanguage,
+                    value: isProLike ? _selectedLearningLanguage : 'Pro only',
                     accent: accent,
                     compact: true,
-                    onTap: () => _pickValue(
-                      title: "Language partner's learning language",
-                      options: _languageOptions,
-                      currentValue: _selectedLearningLanguage,
-                      searchHint: 'Search language',
-                      onSelected: (value) =>
-                          setState(() => _selectedLearningLanguage = value),
-                    ),
+                    locked: !isProLike,
+                    onTap: isProLike
+                        ? () => _pickValue(
+                            title: "Language partner's learning language",
+                            options: _languageOptions,
+                            currentValue: _selectedLearningLanguage,
+                            searchHint: 'Search language',
+                            onSelected: (value) => setState(
+                              () => _selectedLearningLanguage = value,
+                            ),
+                          )
+                        : _showProGate,
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -263,7 +337,8 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
                           min: 18,
                           max: 90,
                           divisions: 18,
-                          onChanged: (value) => setState(() => _ageRange = value),
+                          onChanged: (value) =>
+                              setState(() => _ageRange = value),
                         ),
                       ),
                     ],
@@ -312,7 +387,8 @@ class _MeetFiltersScreenState extends ConsumerState<MeetFiltersScreen> {
                             _GenderSegmentRow(
                               value: _gender,
                               accent: accent,
-                              onChanged: (value) => setState(() => _gender = value),
+                              onChanged: (value) =>
+                                  setState(() => _gender = value),
                             ),
                             const SizedBox(height: 10),
                             _SelectionRow(
@@ -403,6 +479,7 @@ class _SelectionRow extends StatelessWidget {
     required this.accent,
     required this.onTap,
     this.compact = false,
+    this.locked = false,
   });
 
   final String label;
@@ -410,6 +487,7 @@ class _SelectionRow extends StatelessWidget {
   final Color accent;
   final bool compact;
   final VoidCallback onTap;
+  final bool locked;
 
   @override
   Widget build(BuildContext context) {
@@ -456,10 +534,113 @@ class _SelectionRow extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           Icon(
-            Icons.chevron_right_rounded,
+            locked ? Icons.lock_rounded : Icons.chevron_right_rounded,
             size: compact ? 26 : 30,
+            color: locked ? theme.colorScheme.onSurfaceVariant : null,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _DiscoveryModePicker extends StatelessWidget {
+  const _DiscoveryModePicker({
+    required this.selected,
+    required this.proUnlocked,
+    required this.onSelected,
+  });
+
+  final MeetDiscoveryMode selected;
+  final bool proUnlocked;
+  final ValueChanged<MeetDiscoveryMode> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        children: [
+          _DiscoveryModeSegment(
+            label: 'Random',
+            icon: Icons.shuffle_rounded,
+            selected: selected == MeetDiscoveryMode.random,
+            locked: false,
+            onTap: () => onSelected(MeetDiscoveryMode.random),
+          ),
+          _DiscoveryModeSegment(
+            label: 'Nearby',
+            icon: Icons.near_me_rounded,
+            selected: selected == MeetDiscoveryMode.nearby,
+            locked: !proUnlocked,
+            onTap: () => onSelected(MeetDiscoveryMode.nearby),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscoveryModeSegment extends StatelessWidget {
+  const _DiscoveryModeSegment({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.locked,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final bool locked;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final foreground = selected
+        ? Colors.white
+        : theme.colorScheme.onSurfaceVariant;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            color: selected ? talkflixPrimary : Colors.transparent,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                locked ? Icons.lock_rounded : icon,
+                size: 17,
+                color: foreground,
+              ),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: foreground,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -605,9 +786,9 @@ class _SearchPickerSheetState extends State<_SearchPickerSheet> {
           children: [
             Text(
               widget.title,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w900,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 14),
             TextField(

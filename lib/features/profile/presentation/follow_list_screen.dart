@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/auth/session_controller.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/widgets/app_avatar.dart';
 import '../../../core/widgets/feature_scaffold.dart';
@@ -79,16 +80,42 @@ class _FollowListScreenState extends ConsumerState<FollowListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final sessionUserId = ref.watch(
+      sessionControllerProvider.select((state) => state.user?.id ?? ''),
+    );
+    final effectiveUserId = widget.userId.isEmpty
+        ? sessionUserId
+        : widget.userId;
+    final canViewList =
+        effectiveUserId.isNotEmpty && effectiveUserId == sessionUserId;
+    final title = widget.type == FollowListType.followers
+        ? 'Followers'
+        : 'Following';
+
+    if (!canViewList) {
+      return FeatureScaffold(
+        title: title,
+        children: const [
+          SectionCard(
+            title: 'Private list',
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                'Follower and following lists are private. Only the count is visible on profiles.',
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
     final items = ref.watch(
       followListProvider((
-        userId: widget.userId,
+        userId: effectiveUserId,
         type: widget.type,
         query: _query,
       )),
     );
-    final title = widget.type == FollowListType.followers
-        ? 'Followers'
-        : 'Following';
 
     return FeatureScaffold(
       title: title,
@@ -118,7 +145,7 @@ class _FollowListScreenState extends ConsumerState<FollowListScreen> {
                   return RefreshIndicator(
                     onRefresh: () => ref.refresh(
                       followListProvider((
-                        userId: widget.userId,
+                        userId: effectiveUserId,
                         type: widget.type,
                         query: _query,
                       )).future,
@@ -152,7 +179,7 @@ class _FollowListScreenState extends ConsumerState<FollowListScreen> {
                     OutlinedButton(
                       onPressed: () => ref.refresh(
                         followListProvider((
-                          userId: widget.userId,
+                          userId: effectiveUserId,
                           type: widget.type,
                           query: _query,
                         )),

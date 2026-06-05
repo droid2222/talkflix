@@ -1,15 +1,24 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/auth/session_controller.dart';
+import '../../../core/config/storage_keys.dart';
+import '../../../core/media/notification_sound_player.dart';
 import '../../../core/realtime/socket_service.dart';
+import '../application/notification_preferences_controller.dart';
 import '../data/app_notification.dart';
 import '../data/notifications_repository.dart';
 
-final notificationsControllerProvider = StateNotifierProvider.autoDispose<
-    NotificationsController, NotificationsState>((ref) {
-  final controller = NotificationsController(ref);
-  ref.onDispose(controller._cleanup);
-  return controller;
-});
+final notificationsControllerProvider =
+    StateNotifierProvider.autoDispose<
+      NotificationsController,
+      NotificationsState
+    >((ref) {
+      final controller = NotificationsController(ref);
+      ref.onDispose(controller._cleanup);
+      return controller;
+    });
 
 final unreadNotificationCountProvider = StateProvider<int>((ref) => 0);
 
@@ -35,14 +44,11 @@ class NotificationsController extends StateNotifier<NotificationsState> {
 
       state = state.copyWith(
         isLoading: false,
-        notifications: notifications,
+        notifications: _visibleNotifications(notifications),
       );
       _syncUnreadCount();
     } catch (error) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: error.toString(),
-      );
+      state = state.copyWith(isLoading: false, errorMessage: error.toString());
     }
   }
 
@@ -62,6 +68,8 @@ class NotificationsController extends StateNotifier<NotificationsState> {
             fromDisplayName: n.fromDisplayName,
             fromPhotoUrl: n.fromPhotoUrl,
             targetId: n.targetId,
+            targetType: n.targetType,
+            route: n.route,
             isRead: true,
             createdAt: n.createdAt,
           );
@@ -75,7 +83,16 @@ class NotificationsController extends StateNotifier<NotificationsState> {
 
   Future<void> markAllAsRead() async {
     try {
-      await _ref.read(notificationsRepositoryProvider).markAllAsRead();
+      final unreadNotifications = state.notifications
+          .where((notification) => !notification.isRead)
+          .toList(growable: false);
+      await Future.wait(
+        unreadNotifications.map(
+          (notification) => _ref
+              .read(notificationsRepositoryProvider)
+              .markAsRead(notification.id),
+        ),
+      );
       final updated = state.notifications.map((n) {
         return AppNotification(
           id: n.id,
@@ -86,6 +103,8 @@ class NotificationsController extends StateNotifier<NotificationsState> {
           fromDisplayName: n.fromDisplayName,
           fromPhotoUrl: n.fromPhotoUrl,
           targetId: n.targetId,
+          targetType: n.targetType,
+          route: n.route,
           isRead: true,
           createdAt: n.createdAt,
         );
@@ -97,16 +116,71 @@ class NotificationsController extends StateNotifier<NotificationsState> {
 
   void _handleRealtimeNotification(dynamic data) {
     if (data is! Map) return;
-    final notification =
-        AppNotification.fromJson(Map<String, dynamic>.from(data));
+    final notification = AppNotification.fromJson(
+      Map<String, dynamic>.from(data),
+    );
+    unawaited(_applyRealtimeNotification(notification));
+  }
+
+  Future<void> _applyRealtimeNotification(AppNotification notification) async {
+    if (await _shouldPlaySound(notification)) {
+      unawaited(NotificationSoundPlayer.play());
+    }
+    if (!await _shouldDisplay(notification)) return;
     final next = [notification, ...state.notifications];
     state = state.copyWith(notifications: next);
     _syncUnreadCount();
   }
 
+  Future<bool> _shouldDisplay(AppNotification notification) async {
+    final preferences = _ref
+        .read(notificationPreferencesControllerProvider)
+        .preferences;
+    if (!notification.isNotificationCenterVisible) {
+      return false;
+    }
+    if (notification.isFollowType && !preferences.followersEnabled) {
+      return false;
+    }
+    return true;
+  }
+
+  Future<bool> _shouldPlaySound(AppNotification notification) async {
+    final preferences = _ref
+        .read(notificationPreferencesControllerProvider)
+        .preferences;
+    if (notification.isMessageType) {
+      return preferences.messagesEnabled &&
+          preferences.messageSoundEnabled &&
+          !await _messageThreadMuted(notification);
+    }
+    if (notification.isFollowType) {
+      return preferences.followersEnabled && preferences.followerSoundEnabled;
+    }
+    return false;
+  }
+
+  Future<bool> _messageThreadMuted(AppNotification notification) async {
+    final partnerId = notification.fromUserId.trim();
+    if (partnerId.isEmpty) return false;
+    final prefs = await _ref.read(sharedPreferencesProvider.future);
+    return prefs.getBool('${StorageKeys.talkThreadMutedPrefix}$partnerId') ??
+        false;
+  }
+
   void _syncUnreadCount() {
-    final count = state.notifications.where((n) => !n.isRead).length;
+    final count = state.notifications
+        .where((n) => n.isNotificationCenterVisible && !n.isRead)
+        .length;
     _ref.read(unreadNotificationCountProvider.notifier).state = count;
+  }
+
+  List<AppNotification> _visibleNotifications(
+    List<AppNotification> notifications,
+  ) {
+    return notifications
+        .where((notification) => notification.isNotificationCenterVisible)
+        .toList(growable: false);
   }
 
   void _cleanup() {

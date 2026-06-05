@@ -11,7 +11,11 @@ import 'package:flutter/material.dart';
 /// scaling down as it rises. At most [maxVisible] emojis are shown at once;
 /// older ones are discarded when the limit is exceeded.
 class FlyingReactions extends StatefulWidget {
-  const FlyingReactions({super.key, required this.stream, this.maxVisible = 20});
+  const FlyingReactions({
+    super.key,
+    required this.stream,
+    this.maxVisible = 20,
+  });
 
   /// Stream of emoji strings. Each emission triggers a new floating emoji.
   final Stream<String> stream;
@@ -94,10 +98,7 @@ class _FlyingReactionsState extends State<FlyingReactions>
   Widget build(BuildContext context) {
     return ClipRect(
       child: Stack(
-        children: [
-          for (final entry in _entries)
-            _FlyingEmoji(entry: entry),
-        ],
+        children: [for (final entry in _entries) _FlyingEmoji(entry: entry)],
       ),
     );
   }
@@ -144,7 +145,8 @@ class _FlyingEmoji extends AnimatedWidget {
 
     // Horizontal: startX with sine drift
     final baseX = entry.startX * containerW;
-    final drift = sin(t * 2 * pi + entry.driftPhaseOffset) * entry.driftAmplitude;
+    final drift =
+        sin(t * 2 * pi + entry.driftPhaseOffset) * entry.driftAmplitude;
     final x = baseX + drift;
 
     // Fade: fully visible first 60%, then fade out
@@ -160,10 +162,7 @@ class _FlyingEmoji extends AnimatedWidget {
         opacity: opacity,
         child: Transform.scale(
           scale: scale,
-          child: Text(
-            entry.emoji,
-            style: const TextStyle(fontSize: 28),
-          ),
+          child: Text(entry.emoji, style: const TextStyle(fontSize: 28)),
         ),
       ),
     );

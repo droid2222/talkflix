@@ -1,15 +1,19 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../core/auth/session_controller.dart';
+import '../../../core/config/talkflix_icons.dart';
+import '../../../core/media/media_utils.dart';
 import '../../../core/network/api_client.dart';
-import '../../../core/widgets/app_avatar.dart';
 import '../../auth/data/auth_repository.dart';
 import '../../auth/data/signup_options.dart';
 import '../../upgrade/presentation/pro_access_sheet.dart';
 import 'meet_filters_controller.dart';
+import 'meet_user_filter.dart';
 
 final meetFeedLanguageProvider = StateProvider<String>((ref) => 'Any');
 
@@ -20,20 +24,27 @@ final meetUsersProvider = FutureProvider<List<Map<String, dynamic>>>((
   if (userId == null || userId.isEmpty) {
     return const <Map<String, dynamic>>[];
   }
+  final user = ref.watch(sessionControllerProvider.select((s) => s.user));
+  final isProLike = user?.isProLike == true;
+  final learningLanguage = (user?.learnLanguage ?? '').trim();
+  final filters = ref.watch(meetFiltersProvider);
   final selectedLanguage = ref.watch(meetFeedLanguageProvider);
   final query = <String, String>{'limit': '40', 'offset': '0'};
 
-  if (selectedLanguage != 'Any') {
+  if (!isProLike && learningLanguage.isNotEmpty) {
+    query['lang'] = learningLanguage;
+  } else if (selectedLanguage != 'Any') {
     query['lang'] = selectedLanguage;
+  }
+  if (isProLike && filters.discoveryMode == MeetDiscoveryMode.nearby) {
+    query['nearby'] = 'true';
   }
 
   final data = await ref
       .read(apiClientProvider)
       .getJson('/meet/users', queryParameters: query);
 
-  return (data['users'] as List<dynamic>? ?? const [])
-      .whereType<Map<String, dynamic>>()
-      .toList();
+  return discoverableMeetUsers(data['users']);
 });
 
 class MeetScreen extends ConsumerStatefulWidget {
@@ -124,6 +135,20 @@ class _MeetScreenState extends ConsumerState<MeetScreen> {
     ref.read(meetFeedLanguageProvider.notifier).state = selected;
   }
 
+  Future<void> _setDiscoveryMode(MeetDiscoveryMode mode) async {
+    final me = ref.read(sessionControllerProvider).user;
+    if (mode == MeetDiscoveryMode.nearby && me?.isProLike != true) {
+      await showProAccessSheet(
+        context: context,
+        ref: ref,
+        featureName: 'Nearby Partners',
+      );
+      return;
+    }
+    ref.read(meetFiltersProvider.notifier).setDiscoveryMode(mode);
+    ref.invalidate(meetUsersProvider);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -132,7 +157,11 @@ class _MeetScreenState extends ConsumerState<MeetScreen> {
     final filters = ref.watch(meetFiltersProvider);
     final users = ref.watch(meetUsersProvider);
     final langOptions = filters.availableLanguages;
-    final selectedFeedLanguage = ref.watch(meetFeedLanguageProvider);
+    final isProLike = session.user?.isProLike == true;
+    final learningLanguage = (session.user?.learnLanguage ?? '').trim();
+    final selectedFeedLanguage = isProLike
+        ? ref.watch(meetFeedLanguageProvider)
+        : learningLanguage;
     final matchSummary = session.user?.isProLike == true
         ? 'Match unlocked'
         : session.user?.trialUsed == false
@@ -142,100 +171,152 @@ class _MeetScreenState extends ConsumerState<MeetScreen> {
     return Scaffold(
       backgroundColor: scheme.surface,
       body: SafeArea(
-        child: RefreshIndicator(
-          onRefresh: _refreshUsers,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Find Partners',
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.w900,
-                      ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final contentWidth = math.min(constraints.maxWidth, 1280.0);
+            final useGrid = contentWidth >= 760;
+            final columnCount = contentWidth >= 1140 ? 3 : 2;
+            final gridGap = contentWidth >= 1140 ? 18.0 : 16.0;
+            final cardWidth = useGrid
+                ? (contentWidth -
+                          (useGrid ? 48 : 32) -
+                          (gridGap * (columnCount - 1))) /
+                      columnCount
+                : contentWidth;
+
+            return Align(
+              alignment: Alignment.topCenter,
+              child: SizedBox(
+                width: contentWidth,
+                child: RefreshIndicator(
+                  onRefresh: _refreshUsers,
+                  child: ListView(
+                    padding: EdgeInsets.fromLTRB(
+                      useGrid ? 24 : 16,
+                      18,
+                      useGrid ? 24 : 16,
+                      28,
                     ),
-                  ),
-                  _HeaderIconButton(
-                    icon: Icons.tune_rounded,
-                    onTap: () => context.go('/app/meet/filters'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              _AnonymousChatCta(
-                subtitle: matchSummary,
-                onTap: _handleMatchProTap,
-              ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerLowest,
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
                     children: [
-                      for (final language in langOptions)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 10),
-                          child: _LanguagePill(
-                            label: language,
-                            selected: selectedFeedLanguage == language,
-                            onTap: () =>
-                                ref.read(meetFeedLanguageProvider.notifier).state =
-                                    language,
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Find Partners',
+                              style: theme.textTheme.headlineSmall?.copyWith(
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          _HeaderIconButton(
+                            icon: Icons.tune_rounded,
+                            onTap: () => context.go('/app/meet/filters'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      _AnonymousChatCta(
+                        subtitle: matchSummary,
+                        onTap: _handleMatchProTap,
+                      ),
+                      const SizedBox(height: 12),
+                      _MeetModeSwitch(
+                        selected: filters.discoveryMode,
+                        proUnlocked: isProLike,
+                        onSelected: _setDiscoveryMode,
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerLowest,
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              for (final language in langOptions)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 10),
+                                  child: _LanguagePill(
+                                    label: language,
+                                    selected: selectedFeedLanguage == language,
+                                    locked:
+                                        !isProLike &&
+                                        language != learningLanguage,
+                                    onTap: !isProLike
+                                        ? null
+                                        : () {
+                                            ref
+                                                    .read(
+                                                      meetFeedLanguageProvider
+                                                          .notifier,
+                                                    )
+                                                    .state =
+                                                language;
+                                            ref.invalidate(meetUsersProvider);
+                                          },
+                                  ),
+                                ),
+                              _LanguagePill(
+                                label: '+ Add',
+                                selected: false,
+                                locked: !isProLike,
+                                onTap: _addLanguage,
+                              ),
+                            ],
                           ),
                         ),
-                      _LanguagePill(
-                        label: '+ Add',
-                        selected: false,
-                        onTap: _addLanguage,
+                      ),
+                      const SizedBox(height: 20),
+                      users.when(
+                        data: (items) {
+                          if (items.isEmpty) {
+                            return _EmptyMeetState(
+                              onFiltersTap: () =>
+                                  context.go('/app/meet/filters'),
+                            );
+                          }
+
+                          return Wrap(
+                            spacing: gridGap,
+                            runSpacing: gridGap,
+                            children: items
+                                .map(
+                                  (user) => SizedBox(
+                                    width: useGrid
+                                        ? cardWidth
+                                        : double.infinity,
+                                    child: _MeetUserCard(
+                                      user: user,
+                                      onProfile: () => context.go(
+                                        '/app/profile/${user['id']}',
+                                      ),
+                                      onMessage: () =>
+                                          context.go('/app/talk/${user['id']}'),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          );
+                        },
+                        error: (error, _) => _InlineMessage(
+                          text: error.toString(),
+                          background: const Color(0x19E50914),
+                          foreground: talkflixPrimary,
+                        ),
+                        loading: () => const Padding(
+                          padding: EdgeInsets.only(top: 48),
+                          child: Center(child: CircularProgressIndicator()),
+                        ),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 18),
-              users.when(
-                data: (items) {
-                  if (items.isEmpty) {
-                    return _EmptyMeetState(
-                      onFiltersTap: () => context.go('/app/meet/filters'),
-                    );
-                  }
-
-                  return Column(
-                    children: items
-                        .map(
-                          (user) => Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: _MeetUserCard(
-                              user: user,
-                              onChat: () => context.go('/app/talk/${user['id']}'),
-                              onProfile: () =>
-                                  context.go('/app/profile/${user['id']}'),
-                            ),
-                          ),
-                        )
-                        .toList(),
-                  );
-                },
-                error: (error, _) => _InlineMessage(
-                  text: error.toString(),
-                  background: const Color(0x19E50914),
-                  foreground: talkflixPrimary,
-                ),
-                loading: () => const Padding(
-                  padding: EdgeInsets.only(top: 48),
-                  child: Center(child: CircularProgressIndicator()),
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -261,55 +342,108 @@ class _AnonymousChatCta extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(22),
             gradient: const LinearGradient(
-              colors: [Color(0xFFB0000B), Color(0xFFE50914)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFF7C3AED),
+                Color(0xFFE50914),
+                Color(0xFFFF8A00),
+                Color(0xFF00B8D9),
+              ],
+              stops: [0.0, 0.42, 0.72, 1.0],
             ),
             boxShadow: [
               BoxShadow(
-                color: talkflixPrimary.withValues(alpha: 0.28),
-                blurRadius: 16,
-                offset: const Offset(0, 8),
+                color: const Color(0xFFE50914).withValues(alpha: 0.26),
+                blurRadius: 24,
+                spreadRadius: 1,
+                offset: const Offset(0, 12),
+              ),
+              BoxShadow(
+                color: const Color(0xFF7C3AED).withValues(alpha: 0.18),
+                blurRadius: 34,
+                spreadRadius: 2,
               ),
             ],
           ),
-          child: Row(
+          child: Stack(
             children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.14),
-                  shape: BoxShape.circle,
+              Positioned(
+                left: -28,
+                top: -34,
+                child: Container(
+                  width: 110,
+                  height: 110,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
                 ),
-                child: const Icon(Icons.forum_rounded, color: Colors.white),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                  Text(
-                    'Start anonymous chat',
-                    style: theme.textTheme.titleMedium?.copyWith(
+              Positioned(
+                right: 42,
+                bottom: -52,
+                child: Container(
+                  width: 132,
+                  height: 132,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.24),
+                      ),
+                    ),
+                    child: const Icon(TalkflixIcons.talks, color: Colors.white),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Start anonymous chat',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          style: const TextStyle(
+                            color: Color(0xFFFFF4F7),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.17),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.arrow_forward_ios_rounded,
                       color: Colors.white,
-                      fontWeight: FontWeight.w900,
+                      size: 16,
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      color: Color(0xFFFFE6E8),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Icon(
-                Icons.arrow_forward_ios_rounded,
-                color: Colors.white,
-                size: 18,
+                ],
               ),
             ],
           ),
@@ -349,11 +483,13 @@ class _LanguagePill extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onTap,
+    this.locked = false,
   });
 
   final String label;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool locked;
 
   @override
   Widget build(BuildContext context) {
@@ -375,18 +511,139 @@ class _LanguagePill extends StatelessWidget {
               color: selected ? talkflixPrimary : Colors.transparent,
             ),
           ),
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: selected
-                  ? talkflixPrimary
-                  : theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w800,
-              fontSize: 14,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (locked) ...[
+                Icon(
+                  Icons.lock_rounded,
+                  size: 14,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+              ],
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: selected
+                        ? talkflixPrimary
+                        : theme.colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MeetModeSwitch extends StatelessWidget {
+  const _MeetModeSwitch({
+    required this.selected,
+    required this.proUnlocked,
+    required this.onSelected,
+  });
+
+  final MeetDiscoveryMode selected;
+  final bool proUnlocked;
+  final ValueChanged<MeetDiscoveryMode> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        children: [
+          _MeetModeSegment(
+            label: 'Random',
+            icon: Icons.shuffle_rounded,
+            selected: selected == MeetDiscoveryMode.random,
+            locked: false,
+            onTap: () => onSelected(MeetDiscoveryMode.random),
+          ),
+          _MeetModeSegment(
+            label: 'Nearby',
+            icon: Icons.near_me_rounded,
+            selected: selected == MeetDiscoveryMode.nearby,
+            locked: !proUnlocked,
+            onTap: () => onSelected(MeetDiscoveryMode.nearby),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MeetModeSegment extends StatelessWidget {
+  const _MeetModeSegment({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.locked,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final bool locked;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final foreground = selected
+        ? Colors.white
+        : theme.colorScheme.onSurfaceVariant;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            gradient: selected
+                ? const LinearGradient(
+                    colors: [Color(0xFFE50914), Color(0xFFFF8A00)],
+                  )
+                : null,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                locked ? Icons.lock_rounded : icon,
+                size: 17,
+                color: foreground,
+              ),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: foreground,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -397,197 +654,222 @@ class _LanguagePill extends StatelessWidget {
 class _MeetUserCard extends StatelessWidget {
   const _MeetUserCard({
     required this.user,
-    required this.onChat,
     required this.onProfile,
+    required this.onMessage,
   });
 
   final Map<String, dynamic> user;
-  final VoidCallback onChat;
   final VoidCallback onProfile;
+  final VoidCallback onMessage;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final displayName = user['displayName']?.toString() ?? 'User';
-    final city = user['city']?.toString() ?? '';
-    final country = user['country']?.toString() ?? '';
+    final profilePhotoUrl = user['profilePhotoUrl']?.toString().trim() ?? '';
     final firstLanguage = user['firstLanguage']?.toString() ?? '';
     final learnLanguage = user['learnLanguage']?.toString() ?? '';
+    final location = _locationLabel();
     final isProLike =
         user['plan']?.toString() == 'pro' ||
         user['plan']?.toString() == 'trial' ||
         user['role']?.toString() == 'admin';
-    final flagCode = _flagCode(
-      user['nationalityCode']?.toString() ??
-          user['countryCode']?.toString() ??
-          '',
-    );
+    final bio = _buildBio();
 
-    final chips = <String>[
-      if (firstLanguage.isNotEmpty) firstLanguage,
-      if (learnLanguage.isNotEmpty && learnLanguage != firstLanguage)
-        learnLanguage,
-      if (country.isNotEmpty) country,
-    ].take(2).toList();
-
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLowest,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          GestureDetector(
-            onTap: onProfile,
-            child: SizedBox(
-              width: 64,
-              child: AppAvatar(
-                label: displayName,
-                imageUrl: user['profilePhotoUrl']?.toString(),
-                radius: 24,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Material(
+      color: scheme.surfaceContainerLowest,
+      borderRadius: BorderRadius.circular(22),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: onProfile,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Stack(
               children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: GestureDetector(
-                        onTap: onProfile,
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: profilePhotoUrl.isNotEmpty
+                      ? Image.network(
+                          resolveMediaUrl(profilePhotoUrl),
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) =>
+                              _MeetCardPhotoFallback(label: displayName),
+                        )
+                      : _MeetCardPhotoFallback(label: displayName),
+                ),
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.58),
+                        ],
+                        stops: const [0.48, 1],
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 14,
+                  right: 14,
+                  bottom: 12,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
                         child: Text(
                           displayName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.headlineSmall?.copyWith(
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            color: Colors.white,
                             fontWeight: FontWeight.w900,
-                            fontSize: 19,
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withValues(alpha: 0.45),
+                                blurRadius: 10,
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                    ),
-                    if (flagCode.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 4),
-                        child: _FlagBadge(code: flagCode),
-                      ),
-                    if (isProLike)
-                      const Padding(
-                        padding: EdgeInsets.only(left: 6),
-                        child: ProFeatureBadge(compact: true),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    _LanguageMeter(
-                      code: firstLanguage.isEmpty
-                          ? '--'
-                          : firstLanguage
-                                .substring(
-                                  0,
-                                  firstLanguage.length < 2
-                                      ? firstLanguage.length
-                                      : 2,
-                                )
-                                .toUpperCase(),
-                      activeColor: talkflixPrimary,
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 10),
-                      child: Icon(
-                        Icons.swap_horiz_rounded,
-                        color: Color(0xFF6F6F73),
-                      ),
-                    ),
-                    _LanguageMeter(
-                      code: learnLanguage.isEmpty
-                          ? '--'
-                          : learnLanguage
-                                .substring(
-                                  0,
-                                  learnLanguage.length < 2
-                                      ? learnLanguage.length
-                                      : 2,
-                                )
-                                .toUpperCase(),
-                      activeColor: const Color(0xFF8B5CF6),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  [
-                    if (city.isNotEmpty) city,
-                    if (country.isNotEmpty) country,
-                  ].join(', '),
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+                      if (isProLike) ...[
+                        const SizedBox(width: 8),
+                        const ProFeatureBadge(compact: true),
+                      ],
+                    ],
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  _buildBio(
-                    firstLanguage: firstLanguage,
-                    learnLanguage: learnLanguage,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.28),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: chips
-                      .map(
-                        (chip) => Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.surface,
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                          child: Text(
-                            chip,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                      )
-                      .toList(),
                 ),
               ],
             ),
-          ),
-          const SizedBox(width: 12),
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: GestureDetector(
-              onTap: onChat,
-              child: Container(
-                width: 58,
-                height: 58,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFFC00110), talkflixPrimary],
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (firstLanguage.isNotEmpty)
+                        _MeetInfoChip(
+                          icon: Icons.language_rounded,
+                          label: 'Speaks $firstLanguage',
+                          color: talkflixPrimary,
+                        ),
+                      if (learnLanguage.isNotEmpty)
+                        _MeetInfoChip(
+                          icon: Icons.school_rounded,
+                          label: 'Learning $learnLanguage',
+                          color: const Color(0xFF8B5CF6),
+                        ),
+                      if (location.isNotEmpty)
+                        _MeetInfoChip(
+                          icon: Icons.place_rounded,
+                          label: location,
+                          color: const Color(0xFF0EA5E9),
+                        ),
+                    ],
                   ),
-                ),
-                child: const Icon(
-                  Icons.waving_hand_rounded,
-                  color: Colors.white,
-                  size: 26,
-                ),
+                  if (bio.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      bio,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        height: 1.32,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _MeetActionButton(
+                          label: 'Profile',
+                          icon: Icons.person_rounded,
+                          onTap: onProfile,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _MeetActionButton(
+                          label: 'Message',
+                          icon: Icons.chat_bubble_rounded,
+                          filled: true,
+                          onTap: onMessage,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _locationLabel() {
+    final city = user['city']?.toString().trim() ?? '';
+    final country = user['country']?.toString().trim() ?? '';
+    if (city.isNotEmpty && country.isNotEmpty) return '$city, $country';
+    if (city.isNotEmpty) return city;
+    return country;
+  }
+
+  String _buildBio() {
+    final customBio = user['bioText']?.toString().trim() ?? '';
+    if (customBio.isNotEmpty) {
+      return customBio;
+    }
+    return user['bio']?.toString().trim() ?? '';
+  }
+}
+
+class _MeetInfoChip extends StatelessWidget {
+  const _MeetInfoChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.11),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w800,
               ),
             ),
           ),
@@ -595,49 +877,59 @@ class _MeetUserCard extends StatelessWidget {
       ),
     );
   }
-
-  String _buildBio({
-    required String firstLanguage,
-    required String learnLanguage,
-  }) {
-    if (firstLanguage.isEmpty && learnLanguage.isEmpty) {
-      return 'Open to meeting new people and starting a conversation.';
-    }
-    if (firstLanguage.isEmpty) {
-      return 'Currently focused on learning $learnLanguage and meeting language partners.';
-    }
-    if (learnLanguage.isEmpty) {
-      return 'Native in $firstLanguage and open to meeting people worldwide.';
-    }
-    return 'Native $firstLanguage speaker learning $learnLanguage and open to meaningful conversations.';
-  }
 }
 
-class _FlagBadge extends StatelessWidget {
-  const _FlagBadge({required this.code});
+class _MeetActionButton extends StatelessWidget {
+  const _MeetActionButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.filled = false,
+  });
 
-  final String code;
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool filled;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 26,
-      height: 18,
-      clipBehavior: Clip.hardEdge,
-      decoration: const BoxDecoration(),
-      child: Image.network(
-        'https://flagcdn.com/w40/${code.toLowerCase()}.png',
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => Container(
-          color: Theme.of(context).colorScheme.surface,
-          alignment: Alignment.center,
-          child: Text(
-            code,
-            style: const TextStyle(
-              fontSize: 8,
-              fontWeight: FontWeight.w800,
-              height: 1,
-            ),
+    final theme = Theme.of(context);
+    final foreground = filled ? Colors.white : theme.colorScheme.onSurface;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Ink(
+          height: 46,
+          decoration: BoxDecoration(
+            color: filled ? null : theme.colorScheme.surfaceContainerHigh,
+            gradient: filled
+                ? const LinearGradient(
+                    colors: [Color(0xFFE50914), Color(0xFFFF8A00)],
+                  )
+                : null,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: foreground),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: foreground,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -645,30 +937,39 @@ class _FlagBadge extends StatelessWidget {
   }
 }
 
-String _flagCode(String code) {
-  final normalized = code.trim().toUpperCase();
-  if (normalized.length != 2) return '';
-  final first = normalized.codeUnitAt(0);
-  final second = normalized.codeUnitAt(1);
-  if (first < 0x41 || first > 0x5A || second < 0x41 || second > 0x5A) {
-    return '';
-  }
-  return normalized;
-}
+class _MeetCardPhotoFallback extends StatelessWidget {
+  const _MeetCardPhotoFallback({required this.label});
 
-class _LanguageMeter extends StatelessWidget {
-  const _LanguageMeter({required this.code, required this.activeColor});
-
-  final String code;
-  final Color activeColor;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      code,
-      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-        fontWeight: FontWeight.w900,
-        color: activeColor,
+    final scheme = Theme.of(context).colorScheme;
+    final initials = label.trim().isEmpty
+        ? 'U'
+        : label
+              .trim()
+              .split(RegExp(r'\s+'))
+              .take(2)
+              .map((part) => part.isEmpty ? '' : part[0].toUpperCase())
+              .join();
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        gradient: const LinearGradient(
+          colors: [Color(0xFFD61F2C), talkflixPrimary],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Center(
+        child: Text(
+          initials,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            color: Colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
       ),
     );
   }

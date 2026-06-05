@@ -37,19 +37,20 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Talkflix uses the camera for profile photos, calls, and live rooms.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Talkflix connects to your local development server while testing on devices.</string>
+	<string>Talkflix uses the camera for profile photos, video posts, direct video calls, and live rooms.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Talkflix uses contacts only when you choose to save a chat contact or invite someone by SMS. We do not upload your address book to our servers.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Talkflix uses the microphone for voice messages, calls, and live rooms.</string>
+	<string>Talkflix uses the microphone for voice messages, audio posts, direct calls, language practice, and live rooms.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Talkflix saves QR images to your photo library when you export your profile code.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Talkflix uses your photo library so you can choose profile and chat images.</string>
+	<key>NSVoIPUsageDescription</key>
+	<string>Talkflix uses VoIP so you can receive direct voice and video calls.</string>
+	<key>TalkflixDirectCallsEnabled</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -59,12 +60,10 @@
 			<key>UIWindowSceneSessionRoleApplication</key>
 			<array>
 				<dict>
-					<key>UISceneClassName</key>
-					<string>UIWindowScene</string>
 					<key>UISceneConfigurationName</key>
-					<string>flutter</string>
+					<string>Default Configuration</string>
 					<key>UISceneDelegateClassName</key>
-					<string>FlutterSceneDelegate</string>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
 					<key>UISceneStoryboardFile</key>
 					<string>Main</string>
 				</dict>
@@ -73,6 +72,12 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>voip</string>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

@@ -88,7 +88,9 @@ class _MediaPreviewScreenState extends ConsumerState<MediaPreviewScreen> {
             icon: Icon(
               _microphoneEnabled ? Icons.mic_rounded : Icons.mic_off_rounded,
             ),
-            tooltip: _microphoneEnabled ? 'Mute microphone' : 'Unmute microphone',
+            tooltip: _microphoneEnabled
+                ? 'Mute microphone'
+                : 'Unmute microphone',
           ),
           IconButton(
             onPressed: _loading || _error != null ? null : _toggleCamera,
@@ -115,10 +117,7 @@ class _MediaPreviewScreenState extends ConsumerState<MediaPreviewScreen> {
               ? Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                    ),
+                    Text(_error!, textAlign: TextAlign.center),
                     const SizedBox(height: 16),
                     FilledButton.icon(
                       onPressed: _loadPreview,
@@ -184,9 +183,6 @@ class _StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      avatar: Icon(icon, size: 18),
-      label: Text('$label: $value'),
-    );
+    return Chip(avatar: Icon(icon, size: 18), label: Text('$label: $value'));
   }
 }

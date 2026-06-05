@@ -11,10 +11,12 @@ class UserPostComposerScreen extends ConsumerStatefulWidget {
   final String kind;
 
   @override
-  ConsumerState<UserPostComposerScreen> createState() => _UserPostComposerScreenState();
+  ConsumerState<UserPostComposerScreen> createState() =>
+      _UserPostComposerScreenState();
 }
 
-class _UserPostComposerScreenState extends ConsumerState<UserPostComposerScreen> {
+class _UserPostComposerScreenState
+    extends ConsumerState<UserPostComposerScreen> {
   final _titleController = TextEditingController();
   final _summaryController = TextEditingController();
   final _bodyController = TextEditingController();
@@ -55,9 +57,9 @@ class _UserPostComposerScreenState extends ConsumerState<UserPostComposerScreen>
   Future<void> _submit() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Title is required.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Title is required.')));
       return;
     }
     if (_requiresMedia && _selectedFile == null) {
@@ -77,13 +79,16 @@ class _UserPostComposerScreenState extends ConsumerState<UserPostComposerScreen>
         body: _bodyController.text,
       );
       if (_requiresMedia && _selectedFile != null) {
-        await repository.uploadPostMedia(postId: postId, mediaFile: _selectedFile!);
+        await repository.uploadPostMedia(
+          postId: postId,
+          mediaFile: _selectedFile!,
+        );
       }
       ref.invalidate(userPostsProvider);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Post published.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Post published.')));
       Navigator.of(context).pop();
     } catch (error) {
       if (!mounted) return;
@@ -133,7 +138,9 @@ class _UserPostComposerScreenState extends ConsumerState<UserPostComposerScreen>
               onPressed: _submitting ? null : _pickMedia,
               icon: const Icon(Icons.attach_file_rounded),
               label: Text(
-                _selectedFile == null ? 'Select file' : 'Selected: ${_selectedFile!.name}',
+                _selectedFile == null
+                    ? 'Select file'
+                    : 'Selected: ${_selectedFile!.name}',
               ),
             ),
           ],
@@ -147,4 +154,3 @@ class _UserPostComposerScreenState extends ConsumerState<UserPostComposerScreen>
     );
   }
 }
-

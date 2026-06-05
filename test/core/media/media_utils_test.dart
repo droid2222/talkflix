@@ -25,8 +25,14 @@ void main() {
 
   group('resolveMediaUrl', () {
     test('returns absolute http URLs unchanged', () {
-      expect(resolveMediaUrl('http://example.com/a.jpg'), 'http://example.com/a.jpg');
-      expect(resolveMediaUrl('https://cdn.example.com/b.jpg'), 'https://cdn.example.com/b.jpg');
+      expect(
+        resolveMediaUrl('http://example.com/a.jpg'),
+        'http://example.com/a.jpg',
+      );
+      expect(
+        resolveMediaUrl('https://cdn.example.com/b.jpg'),
+        'https://cdn.example.com/b.jpg',
+      );
     });
 
     test('prepends base URL for paths starting with /', () {
@@ -36,7 +42,10 @@ void main() {
     });
 
     test('returns other strings as-is', () {
-      expect(resolveMediaUrl('data:image/png;base64,abc'), 'data:image/png;base64,abc');
+      expect(
+        resolveMediaUrl('data:image/png;base64,abc'),
+        'data:image/png;base64,abc',
+      );
     });
   });
 

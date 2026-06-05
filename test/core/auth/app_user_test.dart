@@ -51,6 +51,41 @@ void main() {
       final user = AppUser.fromJson({'id': 123});
       expect(user.id, '123');
     });
+
+    test('parses age visibility from showAge and ageVisible', () {
+      final showAgeUser = AppUser.fromJson({'showAge': true, 'age': 29});
+      final ageVisibleUser = AppUser.fromJson({'ageVisible': true, 'age': 31});
+
+      expect(showAgeUser.showAge, isTrue);
+      expect(showAgeUser.age, 29);
+      expect(ageVisibleUser.showAge, isTrue);
+      expect(ageVisibleUser.age, 31);
+    });
+
+    test('parses privacy flags from nested privacy payloads', () {
+      final user = AppUser.fromJson({
+        'age': 28,
+        'privacy': {
+          'ageVisible': true,
+          'flagVisible': true,
+          'countryVisible': false,
+        },
+      });
+
+      expect(user.showAge, isTrue);
+      expect(user.showFlag, isTrue);
+      expect(user.showCountry, isFalse);
+      expect(user.showFollowStats, isTrue);
+      expect(user.age, 28);
+    });
+
+    test('parses follow stats visibility from showFollowStats', () {
+      final hidden = AppUser.fromJson({'showFollowStats': false});
+      final visible = AppUser.fromJson({'followStatsVisible': true});
+
+      expect(hidden.showFollowStats, isFalse);
+      expect(visible.showFollowStats, isTrue);
+    });
   });
 
   group('isProLike', () {
@@ -73,5 +108,41 @@ void main() {
     test('returns false for free plan regular user', () {
       expect(makeUser().isProLike, isFalse);
     });
+  });
+
+  group('canPublishToTalkiz', () {
+    test('returns true for creator permission sources', () {
+      expect(AppUser.fromJson({'role': 'creator'}).canPublishToTalkiz, isTrue);
+      expect(
+        AppUser.fromJson({'canPublishVideo': true}).canPublishToTalkiz,
+        isTrue,
+      );
+    });
+
+    test('returns false for regular users without permission', () {
+      expect(AppUser.fromJson({'role': 'user'}).canPublishToTalkiz, isFalse);
+      expect(AppUser.fromJson({'role': 'admin'}).canPublishToTalkiz, isFalse);
+    });
+  });
+
+  test('copyWith overrides cover photo fields', () {
+    final base = AppUser.fromJson({
+      'id': '42',
+      'displayName': 'Alice',
+      'coverPhotoUrls': ['/uploads/one.jpg'],
+      'coverPhotosLocked': true,
+    });
+
+    final next = base.copyWith(
+      coverPhotoUrls: const ['/uploads/two.jpg', '/uploads/three.jpg'],
+      coverPhotosLocked: false,
+    );
+
+    expect(next.id, '42');
+    expect(next.coverPhotoUrls, const [
+      '/uploads/two.jpg',
+      '/uploads/three.jpg',
+    ]);
+    expect(next.coverPhotosLocked, isFalse);
   });
 }

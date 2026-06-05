@@ -5,7 +5,9 @@ import 'package:go_router/go_router.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/auth/app_user.dart';
 import '../../../core/auth/session_controller.dart';
+import '../../../core/config/app_config.dart';
 import '../../../core/network/api_exception.dart';
+import '../../../core/widgets/talkflix_pro_badge.dart';
 import '../../auth/data/auth_repository.dart';
 
 class ProFeatureBadge extends StatelessWidget {
@@ -15,35 +17,7 @@ class ProFeatureBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: compact ? 10 : 12,
-        vertical: compact ? 5 : 6,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xFF64B5FF),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.workspace_premium_rounded,
-            size: compact ? 16 : 18,
-            color: Colors.white,
-          ),
-          const SizedBox(width: 5),
-          Text(
-            'Pro',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: compact ? 12 : 13,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
+    return TalkflixProBadge(compact: compact);
   }
 }
 
@@ -123,6 +97,7 @@ class _ProAccessDialogState extends ConsumerState<_ProAccessDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final showTrial = !widget.user.trialUsed;
+    final showPaidUpgrade = AppConfig.paidUpgradeEnabled;
 
     return Dialog(
       backgroundColor: Colors.transparent,
@@ -166,8 +141,10 @@ class _ProAccessDialogState extends ConsumerState<_ProAccessDialog> {
                   const SizedBox(height: 6),
                   Text(
                     showTrial
-                        ? 'Start your 7 days free trial to use this Pro feature now.'
-                        : 'This is a Pro-only feature. Upgrade to keep using advanced search tools.',
+                        ? 'Start free trial access to use this Pro feature now.'
+                        : showPaidUpgrade
+                        ? 'This is a Pro-only feature. Upgrade with App Store or Google Play billing to keep using it.'
+                        : 'This is a Pro-only feature. Paid upgrades are not available in this app version yet.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
@@ -204,29 +181,35 @@ class _ProAccessDialogState extends ConsumerState<_ProAccessDialog> {
                       child: FilledButton(
                         onPressed: _loading ? null : _startTrial,
                         child: Text(
-                          _loading ? 'Starting...' : 'Start 7 Days Free Trial',
+                          _loading ? 'Starting...' : 'Start Free Trial',
                         ),
                       ),
                     ),
                     const SizedBox(height: 10),
                   ],
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton(
-                      onPressed: _loading
-                          ? null
-                          : () {
-                              Navigator.of(context).pop();
-                              if (context.mounted) {
-                                context.go('/app/upgrade');
-                              }
-                            },
-                      child: Text(showTrial ? 'See Pro plans' : 'Upgrade to Pro'),
+                  if (showPaidUpgrade) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: _loading
+                            ? null
+                            : () {
+                                Navigator.of(context).pop();
+                                if (context.mounted) {
+                                  context.go('/app/upgrade');
+                                }
+                              },
+                        child: Text(
+                          showTrial ? 'See Pro plans' : 'Upgrade to Pro',
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
+                    const SizedBox(height: 10),
+                  ],
                   TextButton(
-                    onPressed: _loading ? null : () => Navigator.of(context).pop(),
+                    onPressed: _loading
+                        ? null
+                        : () => Navigator.of(context).pop(),
                     child: const Text('No thanks'),
                   ),
                 ],

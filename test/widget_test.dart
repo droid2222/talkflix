@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:talkflix_flutter/app/router/app_router.dart';
 import 'package:talkflix_flutter/core/auth/app_user.dart';
 import 'package:talkflix_flutter/core/auth/session_controller.dart';
 import 'package:talkflix_flutter/core/auth/session_state.dart';
@@ -178,7 +179,7 @@ void main() {
     expect(find.text('Copy user ID'), findsOneWidget);
     expect(find.text('Copy API URL'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('Open Talk'),
+      find.text('Open Talks'),
       250,
       scrollable: find.byType(Scrollable).first,
     );
@@ -195,7 +196,7 @@ void main() {
     );
     expect(find.text('Open QA checklist'), findsOneWidget);
     expect(find.text('Open media preview'), findsOneWidget);
-    expect(find.text('Open Talk'), findsOneWidget);
+    expect(find.text('Open Talks'), findsOneWidget);
     expect(find.text('Open Anonymous'), findsOneWidget);
   });
 
@@ -332,7 +333,7 @@ void main() {
     );
 
     await tester.scrollUntilVisible(
-      find.text('Open Talk'),
+      find.text('Open Talks'),
       250,
       scrollable: find.byType(Scrollable).first,
     );
@@ -426,11 +427,76 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Test User'), findsOneWidget);
+    expect(find.text('Test User'), findsNWidgets(2));
     expect(find.text('Talkflix Pro'), findsOneWidget);
-    expect(find.text('Settings'), findsOneWidget);
+    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
     expect(find.text('English'), findsOneWidget);
     expect(find.text('Learning Spanish'), findsOneWidget);
+  });
+
+  testWidgets('own profile cover transitions avoid rebuild exceptions', (
+    tester,
+  ) async {
+    final session = _FakeSessionController(_authenticatedState);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionControllerProvider.overrideWith((ref) => session)],
+        child: const MaterialApp(home: ProfileScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PageView), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    session.setUser(
+      session.state.user!.copyWith(
+        coverPhotoUrls: const [
+          '/uploads/cover-one.jpg',
+          '/uploads/cover-two.jpg',
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(PageView), findsOneWidget);
+    expect(find.byKey(const ValueKey('cover-dot-active-0')), findsOneWidget);
+    await tester.fling(find.byType(PageView), const Offset(-700, 0), 1200);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('cover-dot-active-1')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    session.setUser(
+      session.state.user!.copyWith(
+        coverPhotoUrls: const ['/uploads/cover-one.jpg'],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(PageView), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    session.setUser(session.state.user!.copyWith(coverPhotoUrls: const []));
+    await tester.pumpAndSettle();
+    expect(find.byType(PageView), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  test('app router stays stable on cover-photo-only session updates', () {
+    final session = _FakeSessionController(_authenticatedState);
+    final container = ProviderContainer(
+      overrides: [sessionControllerProvider.overrideWith((ref) => session)],
+    );
+    addTearDown(container.dispose);
+
+    final router = container.read(appRouterProvider);
+
+    session.setUser(
+      session.state.user!.copyWith(
+        coverPhotoUrls: const ['/uploads/cover-one.jpg'],
+      ),
+    );
+
+    expect(identical(container.read(appRouterProvider), router), isTrue);
   });
 }
 
@@ -511,10 +577,8 @@ class _FakeSocketService extends SocketService {
   }
 
   @override
-  bool isVerifiedFor({
-    required String userId,
-    required String sessionId,
-  }) => _connected;
+  bool isVerifiedFor({required String userId, required String sessionId}) =>
+      _connected;
 
   @override
   void disconnect() {
@@ -542,6 +606,14 @@ class _FakeSessionController extends SessionController {
   @override
   Future<void> refreshProfile() async {
     state = _initialState;
+  }
+
+  void setUser(AppUser user) {
+    state = SessionState.authenticated(
+      token: state.token ?? _initialState.token!,
+      sessionId: state.sessionId ?? _initialState.sessionId!,
+      user: user,
+    );
   }
 }
 

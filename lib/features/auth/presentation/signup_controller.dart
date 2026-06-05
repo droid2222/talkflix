@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app/localization/app_language_controller.dart';
+import '../../../app/localization/talkflix_localizations.dart';
 import '../data/auth_repository.dart';
 
 enum SignupStep { account, profile, languages, photo }
@@ -139,6 +141,9 @@ class SignupController extends StateNotifier<SignupState> {
   final Ref _ref;
   Timer? _resendTimer;
 
+  TalkflixLocalizations get _l10n =>
+      TalkflixLocalizations(_ref.read(effectiveAppLocaleProvider));
+
   void updateEmail(String value) {
     state = state.copyWith(
       email: value,
@@ -204,26 +209,26 @@ class SignupController extends StateNotifier<SignupState> {
   }
 
   Future<void> sendCode() async {
+    final l10n = _l10n;
     if (!state.canResendCode) return;
     final email = state.email.trim();
     if (email.isEmpty) {
       state = state.copyWith(
-        errorMessage: 'Please enter your email first.',
+        errorMessage: l10n.enterEmailFirst,
         clearStatus: true,
       );
       return;
     }
     if (!email.contains('@') || !email.contains('.')) {
       state = state.copyWith(
-        errorMessage: 'Enter a valid email address.',
+        errorMessage: l10n.enterValidEmail,
         clearStatus: true,
       );
       return;
     }
     if (state.password.trim().length < 6) {
       state = state.copyWith(
-        errorMessage:
-            'Password must be at least 6 characters before verification.',
+        errorMessage: l10n.passwordBeforeVerification,
         clearStatus: true,
       );
       return;
@@ -235,8 +240,7 @@ class SignupController extends StateNotifier<SignupState> {
       _startResendCooldown();
       state = state.copyWith(
         busy: false,
-        statusMessage:
-            'Verification code sent. Please check your email and enter the code to continue.',
+        statusMessage: l10n.verificationCodeSent,
       );
     } catch (error) {
       state = state.copyWith(busy: false, errorMessage: error.toString());
@@ -244,16 +248,17 @@ class SignupController extends StateNotifier<SignupState> {
   }
 
   Future<void> verifyCode() async {
+    final l10n = _l10n;
     if (state.email.trim().isEmpty) {
       state = state.copyWith(
-        errorMessage: 'Please enter your email first.',
+        errorMessage: l10n.enterEmailFirst,
         clearStatus: true,
       );
       return;
     }
     if (state.code.trim().isEmpty) {
       state = state.copyWith(
-        errorMessage: 'Enter the verification code you received.',
+        errorMessage: l10n.enterVerificationCode,
         clearStatus: true,
       );
       return;
@@ -268,7 +273,7 @@ class SignupController extends StateNotifier<SignupState> {
         busy: false,
         verified: true,
         emailVerificationToken: token,
-        statusMessage: 'Email verified.',
+        statusMessage: l10n.emailVerified,
       );
     } catch (error) {
       state = state.copyWith(busy: false, errorMessage: error.toString());
@@ -276,10 +281,11 @@ class SignupController extends StateNotifier<SignupState> {
   }
 
   Future<AuthResult?> submit() async {
+    final l10n = _l10n;
     state = state.copyWith(
       busy: true,
       clearError: true,
-      statusMessage: 'Creating account...',
+      statusMessage: l10n.creatingAccount,
     );
     try {
       final result = await _ref
@@ -298,7 +304,7 @@ class SignupController extends StateNotifier<SignupState> {
             profilePhotoMimeType: state.profilePhotoMimeType,
             profilePhotoName: state.profilePhotoName,
           );
-      state = state.copyWith(busy: false, statusMessage: 'Account created.');
+      state = state.copyWith(busy: false, statusMessage: l10n.accountCreated);
       return result;
     } catch (error) {
       state = state.copyWith(busy: false, errorMessage: error.toString());

@@ -1,7 +1,33 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 class AppConfig {
   static const _defaultApiBaseUrl = 'https://api.talkflix.cc';
+
+  /// Public web / store landing page used in SMS invites and contact cards.
+  static const publicMarketingUrl = 'https://www.talkflix.cc';
+  static const supportEmail = 'info@talkflix.cc';
+
+  static Uri get supportEmailUri => Uri(
+    scheme: 'mailto',
+    path: supportEmail,
+    queryParameters: const <String, String>{'subject': 'Talkflix Support'},
+  );
+
+  static String get smsInviteBody =>
+      "Let's chat on Talkflix — download the app and find me there: $publicMarketingUrl";
+
+  static String liveBroadcastShareUrl(String broadcastId) {
+    final normalizedId = broadcastId.trim();
+    if (normalizedId.isEmpty) {
+      return '$publicMarketingUrl/app/live';
+    }
+    final uri = Uri.parse(
+      '$publicMarketingUrl/app/live',
+    ).replace(queryParameters: <String, String>{'broadcastId': normalizedId});
+    return uri.toString();
+  }
 
   // Override this to target a local backend when needed.
   // Examples:
@@ -29,6 +55,18 @@ class AppConfig {
   );
   static const _liveUseSfuAudioOverride = String.fromEnvironment(
     'LIVE_USE_SFU_AUDIO',
+  );
+  static const _directCallsEnabledOverride = String.fromEnvironment(
+    'DIRECT_CALLS_ENABLED',
+  );
+  static const _deviceContactsEnabledOverride = String.fromEnvironment(
+    'DEVICE_CONTACTS_ENABLED',
+  );
+  static const _paidUpgradeEnabledOverride = String.fromEnvironment(
+    'PAID_UPGRADE_ENABLED',
+  );
+  static const _proProductIdsOverride = String.fromEnvironment(
+    'IAP_PRO_PRODUCT_IDS',
   );
 
   static bool _envFlag(String raw, {required bool fallback}) {
@@ -111,4 +149,34 @@ class AppConfig {
   // that does not provision media sessions yet.
   static bool get liveUseSfuAudio =>
       _envFlag(_liveUseSfuAudioOverride, fallback: true);
+
+  // Release rollout gates. Direct calls are part of v1 by default.
+  static bool get directCallsEnabled =>
+      _envFlag(_directCallsEnabledOverride, fallback: true);
+
+  static bool get deviceContactsEnabled =>
+      _envFlag(_deviceContactsEnabledOverride, fallback: false);
+
+  static bool get paidUpgradeEnabled =>
+      _envFlag(_paidUpgradeEnabledOverride, fallback: true);
+
+  /// Local diagnostics and QA screens are for debug builds only.
+  ///
+  /// Keep this off for profile/release builds so normal users, app reviewers,
+  /// and production web users cannot access internal diagnostics tools.
+  static const bool localQaToolsEnabled = kDebugMode;
+
+  static List<String> get proProductIds {
+    final overrideIds = _proProductIdsOverride
+        .split(',')
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toList(growable: false);
+    if (overrideIds.isNotEmpty) return overrideIds;
+    return const <String>[
+      'talkflix_pro_monthly',
+      'talkflix_pro_3_months',
+      'talkflix_pro_yearly',
+    ];
+  }
 }
