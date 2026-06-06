@@ -415,19 +415,27 @@ Resolved or accepted for v1 on 2026-06-05:
 - In-app diagnostics/QA entry points are controlled by `AppConfig.localQaToolsEnabled`, which is false in profile/release builds.
 - Production backup retention is documented and old live-folder backups were moved to a root-only archive.
 - Production DB migrations listed in this handoff were verified; direct-call receive defaults are now `1`.
-- Public `/account-deletion` route is documented for Google Play account deletion metadata.
+- Public `/account-deletion` route is documented and deployed for Google Play account deletion metadata.
 - TURN/TLS is accepted as a v1 launch risk because direct-call QA passed on real devices. Revisit this immediately if calls fail on restrictive networks.
 
-Final local verification on 2026-06-05:
+Final local verification on 2026-06-05 after adding `/account-deletion`:
 
 ```text
 dart analyze: passed
 flutter test: 135 tests passed
+flutter build web --release: passed
+https://www.talkflix.cc/ returned HTTP 200
+https://www.talkflix.cc/account-deletion returned HTTP 200
+production main.dart.js contained /account-deletion and "Delete your Talkflix account"
+```
+
+Previous full release verification on 2026-06-05 remains:
+
+```text
 node --check server.js: passed
 node --check socket.js: passed
 flutter build ios --release --no-codesign: passed, Runner.app 47.2MB
 flutter build appbundle --release: passed, app-release.aab 82.0MB
-flutter build web --release: passed
 https://api.talkflix.cc/health: {"ok":true}
 ```
 

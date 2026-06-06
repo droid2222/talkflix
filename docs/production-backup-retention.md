@@ -111,6 +111,38 @@ Whenever production backups are created, moved, or deleted, update this file or 
 
 ## Cleanup Log
 
+### 2026-06-05 Web Account Deletion Deployment Backup
+
+Reason:
+
+- Deployed the Flutter web release build containing the public `/account-deletion` route required for Play Console account deletion metadata.
+
+Fresh protected backup created:
+
+```text
+/root/talkflix-production-backups/20260605-account-deletion-8e254b2/talkflix-web-before.tar.gz
+```
+
+Production path affected:
+
+```text
+/var/www/talkflix-web
+```
+
+Deployment source:
+
+```text
+/Users/talkflix/talkflix_flutter/build/web
+```
+
+Verification performed:
+
+```text
+https://www.talkflix.cc/ returned HTTP 200
+https://www.talkflix.cc/account-deletion returned HTTP 200
+https://www.talkflix.cc/main.dart.js contained /account-deletion and "Delete your Talkflix account"
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:
