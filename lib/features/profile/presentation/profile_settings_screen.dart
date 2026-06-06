@@ -1359,6 +1359,12 @@ class _ProfileSettingsScreenState extends ConsumerState<ProfileSettingsScreen> {
                 title: 'Privacy Policy',
                 onTap: () => context.push('/privacy-policy'),
               ),
+              _SettingsMenuTile(
+                icon: Icons.delete_outline_rounded,
+                iconColor: const Color(0xFF5D4037),
+                title: 'Account Deletion',
+                onTap: () => context.push('/account-deletion'),
+              ),
             ],
           ),
           const SizedBox(height: 14),

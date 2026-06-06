@@ -42,14 +42,17 @@ The homepage must preserve these user-visible elements:
 - Talkflix logo from `assets/images/talkflix_logo.png`.
 - Login and signup calls to action.
 - Public explanation of language practice, tutors, paid partners, coaching, and the web app.
-- Footer links to Terms of Service and Privacy Policy.
+- Footer links to Terms of Service, Privacy Policy, and Account Deletion.
 
 Legal routes used by the footer:
 
 ```text
 /terms-of-service
 /privacy-policy
+/account-deletion
 ```
+
+The account deletion route is a public store-review support page. It must remain accessible without signing in.
 
 ## Required Web Loader
 
@@ -83,7 +86,7 @@ Before changing web routing, homepage UI, share-link handling, or authentication
 
 - Confirm `/` still renders `PublicHomeScreen` for unauthenticated web users.
 - Confirm logged-in web users can still enter the app after choosing a login/signup action.
-- Confirm `/terms-of-service` and `/privacy-policy` still work from the homepage footer.
+- Confirm `/terms-of-service`, `/privacy-policy`, and `/account-deletion` still work from the homepage footer.
 - Confirm shared links such as `/s/:token`, `/w/:token`, and `/app/live?broadcastId=...` still keep their intended behavior.
 - Run `flutter build web --release`.
 - If possible, open the built web app locally or on staging and verify desktop layout, mobile layout, and first-load logo.

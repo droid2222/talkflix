@@ -220,7 +220,7 @@ const _privacyPolicy = _LegalPolicy(
       heading: '6. Your choices and rights',
       paragraphs: [
         'You can update many profile, privacy, language, notification, and account settings inside Talkflix. Depending on your location, you may have rights to access, correct, delete, export, restrict, or object to certain processing of your personal information.',
-        'To request access, correction, deletion, or other privacy help, contact ${AppConfig.supportEmail}. We may need to verify your request before acting on it.',
+        'You can request account deletion at ${AppConfig.accountDeletionUrl}. To request access, correction, deletion, or other privacy help, contact ${AppConfig.supportEmail}. We may need to verify your request before acting on it.',
       ],
     ),
     _LegalSection(

@@ -7,12 +7,28 @@ class AppConfig {
 
   /// Public web / store landing page used in SMS invites and contact cards.
   static const publicMarketingUrl = 'https://www.talkflix.cc';
+  static const accountDeletionPath = '/account-deletion';
+  static const accountDeletionUrl = '$publicMarketingUrl$accountDeletionPath';
   static const supportEmail = 'info@talkflix.cc';
 
   static Uri get supportEmailUri => Uri(
     scheme: 'mailto',
     path: supportEmail,
     queryParameters: const <String, String>{'subject': 'Talkflix Support'},
+  );
+
+  static Uri get accountDeletionEmailUri => Uri(
+    scheme: 'mailto',
+    path: supportEmail,
+    queryParameters: const <String, String>{
+      'subject': 'Talkflix Account Deletion Request',
+      'body':
+          'Please delete my Talkflix account.\n\n'
+          'Account email:\n'
+          'Username, if known:\n'
+          'Reason, optional:\n\n'
+          'Do not include your password in this email.',
+    },
   );
 
   static String get smsInviteBody =>

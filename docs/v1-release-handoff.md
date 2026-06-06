@@ -50,13 +50,40 @@ V1 includes:
 - Live room browse/create/join flows.
 - Meet/discovery flows and Pro-gated discovery behavior.
 - Talkflix Pro subscriptions through native App Store and Google Play IAP.
-- Public homepage, privacy policy, and terms routes.
+- Public homepage, privacy policy, terms, and account deletion routes.
 
 The public web homepage is launch-critical. Preserve the `/` route, source file, required assets, and footer legal links documented in:
 
 ```text
 docs/web-homepage.md
 ```
+
+## Public Account Deletion Route
+
+The public account deletion URL is:
+
+```text
+https://www.talkflix.cc/account-deletion
+```
+
+Client files:
+
+```text
+lib/features/legal/presentation/account_deletion_screen.dart
+lib/app/router/app_router.dart
+lib/core/config/app_config.dart
+```
+
+Important details:
+
+- `/account-deletion` is in the router `publicLocations` set and must stay reachable without signing in.
+- `AppConfig.accountDeletionUrl` centralizes the public URL used by legal copy and store metadata.
+- The homepage footer links to `/account-deletion` next to Terms of Service and Privacy Policy.
+- Profile settings links to `/account-deletion` from the legal/settings area.
+- The page explains the in-app deletion path and the email fallback through `info@talkflix.cc`.
+- Backend account deletion currently requires the current password and soft-deletes the user by setting `deleted_at`, replacing email/username/password, clearing visible profile fields, hiding privacy fields, disabling online status, and disabling direct-call receiving.
+
+Do not remove this route before Google Play review. Play Console should use `https://www.talkflix.cc/account-deletion` as the external account deletion URL.
 
 V1 intentionally defers:
 
@@ -376,6 +403,7 @@ Do not submit until these are resolved or explicitly accepted:
 - IAP production Apple/Google verification credentials are configured and PM2 is restarted.
 - All three Pro plans purchase and restore successfully in sandbox/internal testing.
 - App Store / Play Console privacy and subscription metadata match the actual app behavior.
+- Play Console account deletion URL is set to `https://www.talkflix.cc/account-deletion`.
 - Signed iOS and Android release artifacts are produced and installed on real devices.
 - Store screenshots, build numbers, reviewer notes, and reviewer test credentials are finalized in App Store Connect and Play Console.
 
@@ -387,6 +415,7 @@ Resolved or accepted for v1 on 2026-06-05:
 - In-app diagnostics/QA entry points are controlled by `AppConfig.localQaToolsEnabled`, which is false in profile/release builds.
 - Production backup retention is documented and old live-folder backups were moved to a root-only archive.
 - Production DB migrations listed in this handoff were verified; direct-call receive defaults are now `1`.
+- Public `/account-deletion` route is documented for Google Play account deletion metadata.
 - TURN/TLS is accepted as a v1 launch risk because direct-call QA passed on real devices. Revisit this immediately if calls fail on restrictive networks.
 
 Final local verification on 2026-06-05:

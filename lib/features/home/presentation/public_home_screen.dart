@@ -744,6 +744,10 @@ class _Footer extends StatelessWidget {
                       label: 'Privacy Policy',
                       route: '/privacy-policy',
                     ),
+                    const _FooterLink(
+                      label: 'Account Deletion',
+                      route: '/account-deletion',
+                    ),
                     Text(
                       '(c) 2026 Talkflix. All rights reserved.',
                       style: TextStyle(
