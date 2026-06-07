@@ -111,6 +111,31 @@ Whenever production backups are created, moved, or deleted, update this file or 
 
 ## Cleanup Log
 
+### 2026-06-06 Backend Six-Month IAP Product Deployment Backup
+
+Reason:
+
+- Deployed backend default Pro IAP product IDs after changing the middle subscription plan from `talkflix_pro_3_months` to `talkflix_pro_6_months`.
+
+Fresh protected backup created:
+
+```text
+/root/talkflix-production-backups/20260606-iap-six-months-048113e/server.js.before
+```
+
+Production path affected:
+
+```text
+/opt/talkflix-api/server.js
+```
+
+Verification performed:
+
+```text
+https://api.talkflix.cc/health returned {"ok":true}
+/opt/talkflix-api/server.js contained talkflix_pro_6_months in defaultIapProProductIds
+```
+
 ### 2026-06-05 Web Account Deletion Deployment Backup
 
 Reason:

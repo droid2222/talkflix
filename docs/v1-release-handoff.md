@@ -238,6 +238,8 @@ talkflix_pro_6_months
 talkflix_pro_yearly
 ```
 
+The middle plan changed from `talkflix_pro_3_months` to `talkflix_pro_6_months` on 2026-06-06.
+
 Client product list:
 
 ```text
@@ -293,6 +295,12 @@ Store setup required before launch:
 - Create all three product IDs in Play Console.
 - Keep IDs exactly matching the strings above unless `IAP_PRO_PRODUCT_IDS` is intentionally changed in both app/backend.
 - Complete sandbox/internal-track purchase and restore testing for all three plans.
+
+Production deployment note:
+
+- `/opt/talkflix-api/server.js` was updated and PM2 restarted on 2026-06-06.
+- Production backup: `/root/talkflix-production-backups/20260606-iap-six-months-048113e/server.js.before`.
+- `https://api.talkflix.cc/health` returned `{"ok":true}` after restart.
 
 ## Database Migrations
 
@@ -422,7 +430,7 @@ Final local verification on 2026-06-05 after adding `/account-deletion`:
 
 ```text
 dart analyze: passed
-flutter test: 135 tests passed
+flutter test: 136 tests passed
 flutter build web --release: passed
 https://www.talkflix.cc/ returned HTTP 200
 https://www.talkflix.cc/account-deletion returned HTTP 200
