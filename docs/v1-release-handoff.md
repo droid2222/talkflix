@@ -234,7 +234,7 @@ The app currently supports three native subscription products:
 
 ```text
 talkflix_pro_monthly
-talkflix_pro_3_months
+talkflix_pro_6_months
 talkflix_pro_yearly
 ```
 

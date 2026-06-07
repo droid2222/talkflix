@@ -6,4 +6,12 @@ void main() {
   test('local QA tools follow Flutter debug mode only', () {
     expect(AppConfig.localQaToolsEnabled, kDebugMode);
   });
+
+  test('default Pro IAP product IDs match the store setup', () {
+    expect(AppConfig.proProductIds, const <String>[
+      'talkflix_pro_monthly',
+      'talkflix_pro_6_months',
+      'talkflix_pro_yearly',
+    ]);
+  });
 }

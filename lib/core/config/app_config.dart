@@ -191,7 +191,7 @@ class AppConfig {
     if (overrideIds.isNotEmpty) return overrideIds;
     return const <String>[
       'talkflix_pro_monthly',
-      'talkflix_pro_3_months',
+      'talkflix_pro_6_months',
       'talkflix_pro_yearly',
     ];
   }
