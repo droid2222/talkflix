@@ -32,7 +32,7 @@ Deferred from v1:
 - Complete the App Privacy questionnaire.
 - Complete the age rating questionnaire.
 - Confirm paid digital features are either free/trial-only or implemented through native IAP before submission.
-- Create matching subscription products in App Store Connect and Play Console: `talkflix_pro_monthly`, `talkflix_pro_6_months`, and `talkflix_pro_yearly`, unless overridden with `IAP_PRO_PRODUCT_IDS`.
+- Create matching subscription products in App Store Connect and Play Console: `talkflix_pro_monthly_v2`, `talkflix_pro_6_months`, and `talkflix_pro_yearly`, unless overridden with `IAP_PRO_PRODUCT_IDS`.
 
 ## Reviewer Access
 

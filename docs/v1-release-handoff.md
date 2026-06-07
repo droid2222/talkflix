@@ -233,10 +233,12 @@ Known production risk:
 The app currently supports three native subscription products:
 
 ```text
-talkflix_pro_monthly
+talkflix_pro_monthly_v2
 talkflix_pro_6_months
 talkflix_pro_yearly
 ```
+
+The monthly plan changed from `talkflix_pro_monthly` to `talkflix_pro_monthly_v2` on 2026-06-07 because the original Apple subscription Product ID was already used and cannot be reused.
 
 The middle plan changed from `talkflix_pro_3_months` to `talkflix_pro_6_months` on 2026-06-06.
 
