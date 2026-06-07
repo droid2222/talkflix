@@ -1,6 +1,6 @@
 # Admin Dashboard
 
-Last verified: 2026-06-05
+Last verified: 2026-06-07
 
 This note exists so developers do not have to rediscover where the standalone admin dashboard lives.
 
@@ -58,6 +58,25 @@ GET   /admin/anonymous-match/settings
 PATCH /admin/anonymous-match/settings
 POST  /admin/anonymous-match/reset-history
 ```
+
+Pro/free usage limit settings:
+
+```text
+GET   /admin/pro-limits
+PATCH /admin/pro-limits
+```
+
+These endpoints control the free-plan daily limits documented in:
+
+```text
+docs/pro-entitlements.md
+```
+
+Production dashboard status:
+
+- The Settings page includes a "Free Plan Daily Limits" card.
+- The card reads and saves through `/admin/pro-limits`.
+- Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-07.
 
 The reset-history route clears in-memory anonymous match history:
 

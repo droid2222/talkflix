@@ -19,6 +19,7 @@ import '../../../core/formatters/compact_count_formatter.dart';
 import '../../../core/media/media_utils.dart';
 import '../../../core/media/shared_video_player_pool.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/network/api_exception.dart';
 import '../../../core/widgets/app_avatar.dart';
 import '../../profile/presentation/profile_screen.dart'
     show profileBaseProvider;
@@ -1707,12 +1708,15 @@ class _PodcastCaptionPlayerState extends ConsumerState<_PodcastCaptionPlayer> {
   List<ContentTranscriptTrack> _trackMetas = const <ContentTranscriptTrack>[];
   ContentTranscriptTrack? _activeTrack;
   Timer? _pollTimer;
+  Timer? _watchUsageTimer;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _loadingAudio = true;
   bool _playing = false;
   bool _loadingTranscript = false;
   bool _translating = false;
+  bool _watchUsageBusy = false;
+  bool _watchLimitReached = false;
   String _transcriptStatus = 'none';
   String _transcriptErrorMessage = '';
 
@@ -1726,6 +1730,9 @@ class _PodcastCaptionPlayerState extends ConsumerState<_PodcastCaptionPlayer> {
     _transcriptStatus = widget.item.transcriptStatus;
     _transcriptErrorMessage = widget.item.transcriptErrorMessage;
     _bindPlayer();
+    _watchUsageTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_recordActiveWatchSeconds(15));
+    });
     unawaited(_loadAudio());
     unawaited(_loadTranscript());
   }
@@ -1748,8 +1755,40 @@ class _PodcastCaptionPlayerState extends ConsumerState<_PodcastCaptionPlayer> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _watchUsageTimer?.cancel();
     unawaited(_player.dispose());
     super.dispose();
+  }
+
+  Future<void> _recordActiveWatchSeconds(int seconds) async {
+    if (!mounted || _watchUsageBusy || _watchLimitReached || !_playing) {
+      return;
+    }
+    _watchUsageBusy = true;
+    try {
+      await ref
+          .read(contentRepositoryProvider)
+          .recordContentWatchSeconds(seconds);
+    } on ApiException catch (error) {
+      if (error.statusCode == 402) {
+        _watchLimitReached = true;
+        await _player.pause();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error.message),
+            action: SnackBarAction(
+              label: 'Upgrade',
+              onPressed: () => context.go('/app/upgrade'),
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      // Usage reporting is best-effort during transient connectivity issues.
+    } finally {
+      _watchUsageBusy = false;
+    }
   }
 
   void _bindPlayer() {

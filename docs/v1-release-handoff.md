@@ -230,6 +230,12 @@ Known production risk:
 
 ## Pro IAP
 
+Current Pro entitlement model and free-plan daily limits:
+
+```text
+docs/pro-entitlements.md
+```
+
 The app currently supports three native subscription products:
 
 ```text

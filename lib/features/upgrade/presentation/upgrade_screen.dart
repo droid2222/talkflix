@@ -64,7 +64,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
         SectionCard(
           title: 'Talkflix Pro',
           subtitle:
-              'Upgrade with Apple App Store or Google Play billing. Prices and renewal terms are shown by the store before you confirm.',
+              'Remove daily limits from the features people use most: content, direct calls, live rooms, hosting, stage time, and chat translation.',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -99,6 +99,22 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                 ),
                 const SizedBox(height: 12),
               ],
+              const _ProPromiseCard(),
+              const SizedBox(height: 16),
+              Text(
+                'Choose your plan',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Billing, renewal terms, and cancellation are handled by Apple App Store or Google Play before you confirm.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 14),
               if (purchaseState.loadingProducts) ...[
                 const Center(child: CircularProgressIndicator()),
                 const SizedBox(height: 12),
@@ -212,6 +228,110 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
     if (normalizedId.contains('year')) return 'Talkflix Pro Yearly';
     if (normalizedId.contains('month')) return 'Talkflix Pro Monthly';
     return storeTitle.trim().isEmpty ? 'Talkflix Pro' : storeTitle.trim();
+  }
+}
+
+class _ProPromiseCard extends StatelessWidget {
+  const _ProPromiseCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF101827), Color(0xFF263B68)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Uninterrupted Talkflix',
+            style: theme.textTheme.titleLarge?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Free users can try the full app, but Pro removes the daily waits and time caps.',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: Colors.white.withValues(alpha: 0.82),
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _ProBenefitPill(
+                icon: Icons.play_circle_outline_rounded,
+                label: 'Unlimited videos and podcasts',
+              ),
+              _ProBenefitPill(
+                icon: Icons.call_outlined,
+                label: 'Unlimited direct calls',
+              ),
+              _ProBenefitPill(
+                icon: Icons.groups_2_outlined,
+                label: 'Unlimited live room audience time',
+              ),
+              _ProBenefitPill(
+                icon: Icons.mic_external_on_outlined,
+                label: 'Unlimited hosting and stage time',
+              ),
+              _ProBenefitPill(
+                icon: Icons.translate_rounded,
+                label: 'Unlimited chat translations',
+              ),
+              _ProBenefitPill(
+                icon: Icons.travel_explore_rounded,
+                label: 'Advanced partner discovery',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProBenefitPill extends StatelessWidget {
+  const _ProBenefitPill({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 18),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

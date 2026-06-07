@@ -141,10 +141,10 @@ class _ProAccessDialogState extends ConsumerState<_ProAccessDialog> {
                   const SizedBox(height: 6),
                   Text(
                     showTrial
-                        ? 'Start free trial access to use this Pro feature now.'
+                        ? 'Start free trial access to remove daily limits for this feature now.'
                         : showPaidUpgrade
-                        ? 'This is a Pro-only feature. Upgrade with App Store or Google Play billing to keep using it.'
-                        : 'This is a Pro-only feature. Paid upgrades are not available in this app version yet.',
+                        ? 'Upgrade with App Store or Google Play billing to remove daily limits and keep using Talkflix without interruptions.'
+                        : 'Paid upgrades are not available in this app version yet.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,

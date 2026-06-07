@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../app/localization/app_language_controller.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/media/media_utils.dart';
+import '../../../core/network/api_exception.dart';
 import '../application/saved_content_controller.dart';
 import '../data/content_repository.dart';
 import 'content_engagement_controls.dart';
@@ -34,6 +36,7 @@ class _ContentVideoScreenState extends ConsumerState<ContentVideoScreen> {
   VideoPlayerController? _videoController;
   final ScrollController _transcriptScrollController = ScrollController();
   List<GlobalKey> _transcriptSegmentKeys = const <GlobalKey>[];
+  Timer? _watchUsageTimer;
   Timer? _transcriptPollTimer;
   Timer? _resumeTranscriptAutoFollowTimer;
   int? _scrubDragMs;
@@ -53,16 +56,22 @@ class _ContentVideoScreenState extends ConsumerState<ContentVideoScreen> {
   int _viewCount = 0;
   bool _likedByMe = false;
   bool _savedByMe = false;
+  bool _watchUsageBusy = false;
+  bool _watchLimitReached = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _watchUsageTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_recordActiveWatchSeconds(15));
+    });
     unawaited(_load());
   }
 
   @override
   void dispose() {
+    _watchUsageTimer?.cancel();
     _transcriptPollTimer?.cancel();
     _resumeTranscriptAutoFollowTimer?.cancel();
     _transcriptScrollController.dispose();
@@ -349,6 +358,41 @@ class _ContentVideoScreenState extends ConsumerState<ContentVideoScreen> {
       if (!mounted) return;
       setState(() => _viewCount = state.viewCount);
     } catch (_) {}
+  }
+
+  Future<void> _recordActiveWatchSeconds(int seconds) async {
+    if (!mounted || _watchUsageBusy || _watchLimitReached) return;
+    final controller = _videoController;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        !controller.value.isPlaying) {
+      return;
+    }
+    _watchUsageBusy = true;
+    try {
+      await ref
+          .read(contentRepositoryProvider)
+          .recordContentWatchSeconds(seconds);
+    } on ApiException catch (error) {
+      if (error.statusCode == 402) {
+        _watchLimitReached = true;
+        await controller.pause();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error.message),
+            action: SnackBarAction(
+              label: 'Upgrade',
+              onPressed: () => context.go('/app/upgrade'),
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      // Watch accounting must not crash playback for transient network issues.
+    } finally {
+      _watchUsageBusy = false;
+    }
   }
 
   Future<void> _toggleLike() async {

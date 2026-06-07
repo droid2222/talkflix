@@ -35,6 +35,42 @@ class ContentFeedPage<T> {
   final String? nextCursor;
 }
 
+class ContentUsageState {
+  const ContentUsageState({
+    required this.key,
+    required this.unlimited,
+    required this.limitAmount,
+    required this.usedAmount,
+    required this.remainingAmount,
+    required this.unit,
+  });
+
+  final String key;
+  final bool unlimited;
+  final int? limitAmount;
+  final int? usedAmount;
+  final int? remainingAmount;
+  final String unit;
+
+  factory ContentUsageState.fromJson(Map<String, dynamic> json) {
+    int? readNullableInt(String key) {
+      final value = json[key];
+      return value is num
+          ? value.toInt()
+          : int.tryParse(value?.toString() ?? '');
+    }
+
+    return ContentUsageState(
+      key: json['key']?.toString() ?? '',
+      unlimited: json['unlimited'] == true,
+      limitAmount: readNullableInt('limitAmount'),
+      usedAmount: readNullableInt('usedAmount'),
+      remainingAmount: readNullableInt('remainingAmount'),
+      unit: json['unit']?.toString() ?? '',
+    );
+  }
+}
+
 class ContentVideoItem {
   const ContentVideoItem({
     required this.id,
@@ -1427,6 +1463,21 @@ class ContentRepository {
     return ContentViewState(
       viewCount: (data['viewCount'] as num?)?.toInt() ?? 0,
     );
+  }
+
+  Future<ContentUsageState?> recordContentWatchSeconds(int seconds) async {
+    final normalizedSeconds = seconds.clamp(1, 300);
+    final client = _ref.read(apiClientProvider);
+    final data = await client.postJson(
+      '/me/usage/content-watch',
+      body: <String, dynamic>{'seconds': normalizedSeconds},
+      retries: 0,
+    );
+    final usage = data['usage'];
+    if (usage is Map) {
+      return ContentUsageState.fromJson(Map<String, dynamic>.from(usage));
+    }
+    return null;
   }
 
   Future<ContentLikeState> likeContent(String contentId) async {
