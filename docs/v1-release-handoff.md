@@ -300,6 +300,9 @@ Store setup required before launch:
 
 Production deployment note:
 
+- `/opt/talkflix-api/server.js` was updated and PM2 restarted on 2026-06-07 for `talkflix_pro_monthly_v2`.
+- Production backup: `/root/talkflix-production-backups/20260607-iap-monthly-v2-798c76c/server.js.before`.
+- `https://api.talkflix.cc/health` returned `{"ok":true}` after restart.
 - `/opt/talkflix-api/server.js` was updated and PM2 restarted on 2026-06-06.
 - Production backup: `/root/talkflix-production-backups/20260606-iap-six-months-048113e/server.js.before`.
 - `https://api.talkflix.cc/health` returned `{"ok":true}` after restart.
