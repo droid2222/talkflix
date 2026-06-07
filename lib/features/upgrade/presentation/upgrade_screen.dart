@@ -202,6 +202,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
 
   String _planTitle(String productId, String storeTitle) {
     final normalizedId = productId.toLowerCase();
+    if (normalizedId.contains('6') && normalizedId.contains('month')) {
+      return 'Talkflix Pro 6 Months';
+    }
     if ((normalizedId.contains('3') && normalizedId.contains('month')) ||
         normalizedId.contains('quarter')) {
       return 'Talkflix Pro 3 Months';
