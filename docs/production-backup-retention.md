@@ -272,6 +272,47 @@ production /coaching still contained Private 1-on-1 Coaching and one_on_one_coac
 browser test: https://www.talkflix.cc/coaching -> Home landed on https://www.talkflix.cc/ with static home-page visible and no Flutter view active
 ```
 
+### 2026-06-09 Admin Stripe Config Deployment Backup
+
+Reason:
+
+- Added a Settings page "Stripe Checkout" card to the standalone admin dashboard.
+- Added protected backend routes for masked Stripe config status and superadmin-only saving/clearing.
+- Checkout now reads `STRIPE_SECRET_KEY` from the server environment first, then from encrypted dashboard storage in `app_settings`.
+- Stripe webhook verification now reads `STRIPE_WEBHOOK_SECRET` from the server environment first, then from encrypted dashboard storage in `app_settings`.
+- Added a dedicated `SECRET_ENCRYPTION_KEY` to the production API environment so dashboard-saved secrets are not tied to `JWT_SECRET` rotation.
+
+Fresh protected backups created:
+
+```text
+/root/talkflix-production-backups/20260609-admin-stripe-config/server.js.before
+/root/talkflix-production-backups/20260609-admin-stripe-config/admin-index.html.before
+/root/talkflix-production-backups/20260609-admin-stripe-config/env.before-secret-encryption-key
+```
+
+Production paths affected:
+
+```text
+/opt/talkflix-api/server.js
+/opt/talkflix-api/.env
+/var/www/talkflix-admin/index.html
+```
+
+Verification performed:
+
+```text
+node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+admin dashboard inline script syntax check: passed
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api: passed
+SECRET_ENCRYPTION_KEY added without printing the generated value
+pm2 restart talkflix-api --update-env: passed
+server-local /health returned {"ok":true}
+server-local /admin/commerce/stripe-config returned 401 without auth, confirming the route is registered and protected
+server-local /commerce/checkout-sessions still returned STRIPE_SECRET_KEY is not configured until a Stripe key is saved
+production admin index.html contained Stripe Checkout, stripe-config, and stripeSecretKeyInput
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:

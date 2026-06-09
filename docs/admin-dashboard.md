@@ -66,6 +66,20 @@ GET   /admin/pro-limits
 PATCH /admin/pro-limits
 ```
 
+Stripe web commerce settings:
+
+```text
+GET   /admin/commerce/stripe-config
+PATCH /admin/commerce/stripe-config
+```
+
+The Settings page includes a "Stripe Checkout" card where a super admin can save or clear:
+
+- Stripe secret key (`sk_live_...` or `sk_test_...`)
+- Stripe webhook secret (`whsec_...`)
+
+The dashboard never displays saved secrets. It only shows masked status and source. Saved secrets are encrypted server-side before being stored in `app_settings`. Prefer setting a stable `SECRET_ENCRYPTION_KEY` on the API server for long-term secret storage. If `STRIPE_SECRET_KEY` or `STRIPE_WEBHOOK_SECRET` is set as a server environment variable, that environment value remains the effective value.
+
 These endpoints control the free-plan daily limits documented in:
 
 ```text
@@ -76,7 +90,9 @@ Production dashboard status:
 
 - The Settings page includes a "Free Plan Daily Limits" card.
 - The card reads and saves through `/admin/pro-limits`.
-- Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-07.
+- The Settings page includes a "Stripe Checkout" card.
+- The card reads and saves through `/admin/commerce/stripe-config`.
+- Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-09.
 
 The reset-history route clears in-memory anonymous match history:
 

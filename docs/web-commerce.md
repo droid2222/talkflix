@@ -125,10 +125,15 @@ Status on 2026-06-09:
 
 - Web `/coaching` route is deployed in the production Flutter bundle.
 - `GET https://api.talkflix.cc/commerce/products` returns `one_on_one_coaching`.
-- `POST https://api.talkflix.cc/commerce/checkout-sessions` reaches the API but returns `STRIPE_SECRET_KEY is not configured.`
+- `POST https://api.talkflix.cc/commerce/checkout-sessions` reaches the API but returns `STRIPE_SECRET_KEY is not configured` until the key is saved in the admin dashboard or provided as a server environment variable.
+- Admin dashboard Settings includes a "Stripe Checkout" card for saving the Stripe secret key and webhook secret.
 - Production backend backup before deploying the commerce routes: `/root/talkflix-production-backups/20260609-homepage-commerce-api/server.js.before`.
 
-Do not send `/coaching` to a paying client until the Stripe production env vars above are configured and PM2 is restarted.
+Do not send `/coaching` to a paying client until the Stripe secret key and webhook secret are configured through the admin dashboard or as production env vars. PM2 restart is only required for env var changes, not for dashboard-saved secrets.
+
+Dashboard-saved Stripe secrets are encrypted in `app_settings`, masked on read, and never returned to the browser after saving.
+
+For long-term production safety, set a stable `SECRET_ENCRYPTION_KEY` on the API server. The backend can fall back to `JWT_SECRET`, but rotating `JWT_SECRET` after saving dashboard secrets would make those saved secrets unreadable unless `SECRET_ENCRYPTION_KEY` is configured.
 
 ## Launch Checklist
 
