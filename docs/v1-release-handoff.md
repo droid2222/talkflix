@@ -52,11 +52,17 @@ V1 includes:
 - Talkflix Pro subscriptions through native App Store and Google Play IAP.
 - Public homepage, privacy policy, terms, and account deletion routes.
 
-The public web homepage is launch-critical. Preserve the `/` route, source file, required assets, and footer legal links documented in:
+The public web homepage is launch-critical. Preserve the static `/` route, source file, required assets, footer legal links, and guarded build workflow documented in:
 
 ```text
 docs/web-homepage.md
 ```
+
+Use `tool/build_web_preserving_homepage.sh` for web release builds. Do not deploy a raw Flutter-generated `index.html` over the static homepage.
+
+Production restore note: the static homepage was restored on 2026-06-09 from guarded `build/web` output. Backup: `/root/talkflix-production-backups/20260609-homepage-restore/talkflix-web-before.tar.gz`.
+
+The `/coaching` web route and `/commerce/products` backend route are deployed, but Stripe checkout is not payment-ready until production `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are added and PM2 is restarted.
 
 ## Public Account Deletion Route
 
@@ -369,7 +375,7 @@ dart analyze
 flutter test
 flutter build appbundle --release
 flutter build ios --release --no-codesign
-flutter build web --release
+tool/build_web_preserving_homepage.sh
 ```
 
 Backend syntax checks:

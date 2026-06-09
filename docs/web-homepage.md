@@ -1,8 +1,10 @@
 # Talkflix Web Homepage
 
-Last verified: 2026-06-05
+Last verified: 2026-06-09
 
 This note exists so future web or Flutter changes do not accidentally replace the public homepage.
+
+Production restore note: the static homepage was redeployed on 2026-06-09 from the guarded `build/web` output. The production backup is documented in `docs/production-backup-retention.md`.
 
 ## Public Route
 
@@ -13,35 +15,52 @@ https://www.talkflix.cc/
 https://talkflix.cc/
 ```
 
-In the Flutter web router, `/` must stay public and must render:
+The source of truth for the public `/` homepage is the static HTML shell:
 
 ```text
-lib/features/home/presentation/public_home_screen.dart
+web/index.html
 ```
 
-Router source:
+This is intentional. The public root must show the branded marketing homepage before the Flutter app starts. It is not the same as the authenticated Flutter web app shell.
+
+The Flutter router still contains a `/` route in:
 
 ```text
 lib/app/router/app_router.dart
 ```
 
-The route is registered as:
+However, `web/index.html` owns the browser root route. For non-root routes, the static shell loads Flutter dynamically with:
 
-```dart
-GoRoute(path: '/', builder: (context, state) => const PublicHomeScreen())
+```text
+flutter_bootstrap.js
 ```
 
-Do not redirect unauthenticated web users from `/` directly into `/login` or `/app/*`. The homepage is the public marketing entry point.
+Examples of routes that must continue loading the Flutter app:
+
+```text
+/login
+/signup
+/app/*
+/coaching
+/terms-of-service
+/privacy-policy
+/account-deletion
+/s/:token
+/w/:token
+```
+
+Do not replace `web/index.html` with a Flutter-only loader. That is the exact failure mode that removes the real homepage.
 
 ## Required Homepage Elements
 
 The homepage must preserve these user-visible elements:
 
-- Hero section with Talkflix branding.
-- Background image from `assets/images/live_room_bg.png`.
-- Talkflix logo from `assets/images/talkflix_logo.png`.
+- Static `<main class="home-page">` markup for `/`.
+- Background image from `web/images/talkflix-language-social-hero.jpg`.
+- Transparent-background logo from `web/images/talkflix-logo-transparent.png`.
 - Login and signup calls to action.
 - Public explanation of language practice, tutors, paid partners, coaching, and the web app.
+- Coaching call to action linking to `/coaching`.
 - Footer links to Terms of Service, Privacy Policy, and Account Deletion.
 
 Legal routes used by the footer:
@@ -54,43 +73,57 @@ Legal routes used by the footer:
 
 The account deletion route is a public store-review support page. It must remain accessible without signing in.
 
-## Required Web Loader
-
-The first web loading screen in `web/index.html` uses the transparent-background logo:
+The public coaching route is web-only and public:
 
 ```text
+/coaching
+```
+
+It is documented in:
+
+```text
+docs/web-commerce.md
+```
+
+## Required Assets
+
+These static web assets are part of the homepage contract:
+
+```text
+web/images/talkflix-language-social-hero.jpg
 web/images/talkflix-logo-transparent.png
 ```
 
-Do not remove or replace this loader asset without verifying the first-load experience on desktop and mobile web.
+Do not remove, rename, compress beyond recognition, or replace these assets without verifying the first-load experience on desktop and mobile web.
 
-## Asset Registration
+## Build Guard
 
-The homepage Flutter assets must remain registered in:
+Run the homepage guard before shipping web changes:
 
-```text
-pubspec.yaml
+```bash
+tool/check_web_homepage.sh
 ```
 
-Current required entries:
+For Flutter web releases, use the guarded build command instead of raw `flutter build web`:
 
-```yaml
-assets:
-  - assets/images/talkflix_logo.png
-  - assets/images/live_room_bg.png
+```bash
+tool/build_web_preserving_homepage.sh
 ```
+
+The guarded build checks `web/index.html`, runs the Flutter build, copies the static homepage into `build/web/index.html`, and checks the built output again.
 
 ## Safe Change Checklist
 
-Before changing web routing, homepage UI, share-link handling, or authentication redirects:
+Before changing web routing, homepage UI, share-link handling, authentication redirects, or deployment scripts:
 
-- Confirm `/` still renders `PublicHomeScreen` for unauthenticated web users.
-- Confirm logged-in web users can still enter the app after choosing a login/signup action.
-- Confirm `/terms-of-service`, `/privacy-policy`, and `/account-deletion` still work from the homepage footer.
-- Confirm shared links such as `/s/:token`, `/w/:token`, and `/app/live?broadcastId=...` still keep their intended behavior.
-- Run `flutter build web --release`.
+- Confirm `/` shows the static branded homepage with the hero background and transparent logo.
+- Confirm `/login`, `/signup`, `/app/*`, `/coaching`, legal routes, and share links still load Flutter correctly.
+- Confirm logged-in web users can still enter the app from the homepage login/open-app actions.
+- Confirm footer links to `/terms-of-service`, `/privacy-policy`, and `/account-deletion` work.
+- Run `tool/check_web_homepage.sh`.
+- Run `tool/build_web_preserving_homepage.sh`.
 - If possible, open the built web app locally or on staging and verify desktop layout, mobile layout, and first-load logo.
 
 ## Handoff Rule
 
-Treat the public homepage as launch-critical. If a future update replaces the homepage with the app shell, login page, blank screen, or a temporary placeholder, revert that part before release.
+Treat the public homepage as launch-critical. If a future update replaces the homepage with the app shell, login page, blank screen, or a temporary placeholder, stop the release and restore `web/index.html` before deploying.

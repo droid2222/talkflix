@@ -424,11 +424,12 @@ class _ServicesSection extends StatelessWidget {
                   ),
                   _ServiceCard(
                     icon: Icons.workspace_premium_outlined,
-                    title: 'Private coaching services',
+                    title: 'Private 1-on-1 coaching',
                     copy:
-                        'Offer focused coaching for pronunciation, interviews, travel, business, and fluency goals.',
+                        'Book a focused private session for clarity, direction, and practical next steps.',
                     accent: Color(0xFFE5484D),
-                    action: 'Coming soon',
+                    action: 'Book coaching',
+                    route: '/coaching',
                   ),
                   _ServiceCard(
                     icon: Icons.forum_outlined,

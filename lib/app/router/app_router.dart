@@ -9,6 +9,7 @@ import '../../features/auth/presentation/forgot_password_screen.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/reset_password_screen.dart';
 import '../../features/auth/presentation/signup_screen.dart';
+import '../../features/commerce/presentation/coaching_screen.dart';
 import '../../features/content/presentation/content_screen.dart';
 import '../../features/content/presentation/content_video_screen.dart';
 import '../../features/content/presentation/creator_studio_screen.dart';
@@ -70,6 +71,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         '/terms-of-service',
         '/privacy-policy',
         '/account-deletion',
+        '/coaching',
         '/forgot-password',
         '/reset-password',
       };
@@ -149,6 +151,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppConfig.accountDeletionPath,
         builder: (context, state) => const AccountDeletionScreen(),
+      ),
+      GoRoute(
+        path: '/coaching',
+        builder: (context, state) => const CoachingScreen(),
       ),
       GoRoute(
         path: '/s/:token',

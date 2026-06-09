@@ -46,7 +46,7 @@ The standalone admin dashboard is documented in [`docs/admin-dashboard.md`](/Use
 
 ## Web homepage
 
-The public web homepage is documented in [`docs/web-homepage.md`](/Users/talkflix/talkflix_flutter/docs/web-homepage.md). It covers the `/` route, homepage source file, required logo/background assets, footer legal links, and safe-change checklist.
+The public web homepage is documented in [`docs/web-homepage.md`](/Users/talkflix/talkflix_flutter/docs/web-homepage.md). It covers the `/` route, homepage source file, required logo/background assets, footer legal links, safe-change checklist, and guarded web build command.
 
 ## V1 release handoff
 

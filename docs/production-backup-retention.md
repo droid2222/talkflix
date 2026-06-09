@@ -193,6 +193,50 @@ https://www.talkflix.cc/account-deletion returned HTTP 200
 https://www.talkflix.cc/main.dart.js contained /account-deletion and "Delete your Talkflix account"
 ```
 
+### 2026-06-09 Static Homepage Restore Deployment Backup
+
+Reason:
+
+- Restored the launch-critical static web homepage after the production root had been overwritten by a Flutter-only loader.
+- Added a guarded web build workflow so future Flutter web releases preserve the static homepage in `build/web/index.html`.
+- Deployed the matching commerce API route support because the restored homepage links to the public `/coaching` page.
+
+Fresh protected backup created:
+
+```text
+/root/talkflix-production-backups/20260609-homepage-restore/talkflix-web-before.tar.gz
+/root/talkflix-production-backups/20260609-homepage-commerce-api/server.js.before
+```
+
+Production path affected:
+
+```text
+/var/www/talkflix-web
+/opt/talkflix-api/server.js
+```
+
+Deployment source:
+
+```text
+/Users/talkflix/talkflix_flutter/build/web
+```
+
+Verification performed:
+
+```text
+tool/check_web_homepage.sh: passed
+tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
+https://www.talkflix.cc/ returned HTTP 200 with static home-page markup
+https://www.talkflix.cc/coaching returned HTTP 200
+https://www.talkflix.cc/account-deletion returned HTTP 200
+production index.html contained talkflix-language-social-hero.jpg, talkflix-logo-transparent.png, /coaching, /account-deletion, and flutter_bootstrap.js
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api: passed
+https://api.talkflix.cc/health returned {"ok":true}
+https://api.talkflix.cc/commerce/products returned one_on_one_coaching
+POST https://api.talkflix.cc/commerce/checkout-sessions returned STRIPE_SECRET_KEY is not configured because production Stripe env vars are not set yet
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:
