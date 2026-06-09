@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/navigation/public_home_navigation.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../app/theme/app_theme.dart';
 import '../data/commerce_repository.dart';
@@ -164,7 +165,7 @@ class _CoachingTopNav extends StatelessWidget {
     return Row(
       children: [
         InkWell(
-          onTap: () => context.go('/'),
+          onTap: () => openPublicHome(context),
           borderRadius: BorderRadius.circular(8),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -194,7 +195,7 @@ class _CoachingTopNav extends StatelessWidget {
         const Spacer(),
         if (!compact)
           TextButton(
-            onPressed: () => context.go('/'),
+            onPressed: () => openPublicHome(context),
             style: TextButton.styleFrom(foregroundColor: Colors.white),
             child: const Text('Home'),
           ),
@@ -564,7 +565,7 @@ class _CoachingFooter extends StatelessWidget {
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 TextButton(
-                  onPressed: () => context.go('/'),
+                  onPressed: () => openPublicHome(context),
                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                   child: const Text('Talkflix home'),
                 ),

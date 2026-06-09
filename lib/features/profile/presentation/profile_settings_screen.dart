@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +12,7 @@ import '../../../core/config/app_config.dart';
 import '../../../core/config/privacy_settings_controller.dart';
 import '../../../core/config/storage_keys.dart';
 import '../../../core/config/talkflix_icons.dart';
+import '../../../core/navigation/public_home_navigation.dart';
 import '../../notifications/application/notification_preferences_controller.dart';
 import '../data/profile_repository.dart';
 import '../../auth/data/signup_options.dart';
@@ -1187,15 +1187,7 @@ class _ProfileSettingsScreenState extends ConsumerState<ProfileSettingsScreen> {
   }
 
   Future<void> _goToLoggedOutDestination() async {
-    if (!kIsWeb) {
-      context.go('/login');
-      return;
-    }
-    final homeUri = Uri.base.replace(path: '/', query: null, fragment: null);
-    final opened = await launchUrl(homeUri, webOnlyWindowName: '_self');
-    if (!opened && mounted) {
-      context.go('/');
-    }
+    await openPublicHome(context);
   }
 
   Widget _buildAppearanceContent(ThemeMode themeMode) {

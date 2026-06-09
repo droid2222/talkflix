@@ -237,6 +237,41 @@ https://api.talkflix.cc/commerce/products returned one_on_one_coaching
 POST https://api.talkflix.cc/commerce/checkout-sessions returned STRIPE_SECRET_KEY is not configured because production Stripe env vars are not set yet
 ```
 
+### 2026-06-09 Flutter Homepage Removal Deployment Backup
+
+Reason:
+
+- Removed the obsolete Flutter `PublicHomeScreen` so it cannot appear after in-app navigation from `/coaching` or other public Flutter routes.
+- Updated web public-home navigation to force a full browser load of `/`, preserving the static homepage as the only public homepage.
+
+Fresh protected backup created:
+
+```text
+/root/talkflix-production-backups/20260609-remove-flutter-home/talkflix-web-before.tar.gz
+```
+
+Production path affected:
+
+```text
+/var/www/talkflix-web
+```
+
+Deployment source:
+
+```text
+/Users/talkflix/talkflix_flutter/build/web
+```
+
+Verification performed:
+
+```text
+dart analyze edited Dart files: passed
+tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
+production main.dart.js did not contain PublicHomeScreen or old Flutter homepage text
+production /coaching still contained Private 1-on-1 Coaching and one_on_one_coaching
+browser test: https://www.talkflix.cc/coaching -> Home landed on https://www.talkflix.cc/ with static home-page visible and no Flutter view active
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:

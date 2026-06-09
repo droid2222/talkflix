@@ -29,7 +29,17 @@ The Flutter router still contains a `/` route in:
 lib/app/router/app_router.dart
 ```
 
-However, `web/index.html` owns the browser root route. For non-root routes, the static shell loads Flutter dynamically with:
+That route is only a safety redirect. It must not render a Flutter homepage. If Flutter ever handles `/` internally, it should force a full browser navigation back to the static root or fall back to login.
+
+Flutter public pages that need a Home action must use:
+
+```text
+lib/core/navigation/public_home_navigation.dart
+```
+
+Do not use `context.go('/')` for public web Home actions.
+
+`web/index.html` owns the browser root route. For non-root routes, the static shell loads Flutter dynamically with:
 
 ```text
 flutter_bootstrap.js
@@ -49,7 +59,7 @@ Examples of routes that must continue loading the Flutter app:
 /w/:token
 ```
 
-Do not replace `web/index.html` with a Flutter-only loader. That is the exact failure mode that removes the real homepage.
+Do not replace `web/index.html` with a Flutter-only loader, and do not reintroduce a Flutter `PublicHomeScreen`. Those are the failure modes that make the wrong homepage visible.
 
 ## Required Homepage Elements
 

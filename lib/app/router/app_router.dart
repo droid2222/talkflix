@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/auth/session_controller.dart';
 import '../../core/config/app_config.dart';
+import '../../core/navigation/public_home_navigation.dart';
 import '../../features/auth/presentation/forgot_password_screen.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/reset_password_screen.dart';
@@ -17,7 +20,6 @@ import '../../features/content/presentation/podcast_composer_screen.dart';
 import '../../features/content/presentation/post_composer_screen.dart';
 import '../../features/content/presentation/shared_content_link_screen.dart';
 import '../../features/content/presentation/user_post_composer_screen.dart';
-import '../../features/home/presentation/public_home_screen.dart';
 import '../../features/legal/presentation/account_deletion_screen.dart';
 import '../../features/legal/presentation/legal_policy_screen.dart';
 import '../../features/live/presentation/live_screen.dart';
@@ -137,7 +139,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
-      GoRoute(path: '/', builder: (context, state) => const PublicHomeScreen()),
+      GoRoute(
+        path: '/',
+        builder: (context, state) => const _PublicHomeRedirectScreen(),
+      ),
       GoRoute(
         path: '/terms-of-service',
         builder: (context, state) =>
@@ -409,6 +414,29 @@ final appRouterProvider = Provider<GoRouter>((ref) {
     ],
   );
 });
+
+class _PublicHomeRedirectScreen extends StatefulWidget {
+  const _PublicHomeRedirectScreen();
+
+  @override
+  State<_PublicHomeRedirectScreen> createState() =>
+      _PublicHomeRedirectScreenState();
+}
+
+class _PublicHomeRedirectScreenState extends State<_PublicHomeRedirectScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(openPublicHome(context));
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => const _LoadingScreen();
+}
 
 class _LoadingScreen extends StatelessWidget {
   const _LoadingScreen();

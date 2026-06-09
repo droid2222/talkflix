@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/navigation/public_home_navigation.dart';
 
 enum LegalPolicyType { terms, privacy }
 
@@ -26,7 +27,7 @@ class LegalPolicyScreen extends StatelessWidget {
             if (Navigator.of(context).canPop()) {
               context.pop();
             } else {
-              context.go('/');
+              openPublicHome(context);
             }
           },
         ),

@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
+import '../../../core/navigation/public_home_navigation.dart';
 
 class AccountDeletionScreen extends ConsumerWidget {
   const AccountDeletionScreen({super.key});
@@ -37,7 +38,7 @@ class AccountDeletionScreen extends ConsumerWidget {
             if (Navigator.of(context).canPop()) {
               context.pop();
             } else {
-              context.go('/');
+              openPublicHome(context);
             }
           },
         ),

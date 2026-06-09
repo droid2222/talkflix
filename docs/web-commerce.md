@@ -45,10 +45,10 @@ Router source:
 lib/app/router/app_router.dart
 ```
 
-Flutter public-home fallback card:
+Static homepage entry point:
 
 ```text
-lib/features/home/presentation/public_home_screen.dart
+web/index.html
 ```
 
 ## Payment Model

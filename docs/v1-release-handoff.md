@@ -64,6 +64,8 @@ Production restore note: the static homepage was restored on 2026-06-09 from gua
 
 The `/coaching` web route and `/commerce/products` backend route are deployed, but Stripe checkout is not payment-ready until production `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are added and PM2 is restarted.
 
+The obsolete Flutter public homepage was removed on 2026-06-09. Public Home buttons in Flutter web routes must use `openPublicHome(context)` so they perform a full browser navigation to the static homepage instead of `context.go('/')`.
+
 ## Public Account Deletion Route
 
 The public account deletion URL is:
