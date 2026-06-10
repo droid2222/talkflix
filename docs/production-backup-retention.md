@@ -357,6 +357,36 @@ production admin index.html contained Coaching & Products, /admin/commerce/produ
 browser test: https://www.talkflix.cc/coaching/one-on-one-coaching rendered the 1-on-1 Coaching product and Book with Stripe CTA
 ```
 
+### 2026-06-10 Admin Dashboard Cache Headers Backup
+
+Reason:
+
+- Production admin dashboard HTML already contained the Coaching section, but browser sessions could still show an older cached dashboard because `/admin/` did not send cache-control headers.
+- Added no-cache headers to the canonical admin Nginx route so admin dashboard edits appear immediately after deployment.
+
+Fresh protected backups created:
+
+```text
+/root/talkflix-production-backups/20260610-admin-cache-headers/talkflix-web.before
+/root/talkflix-production-backups/20260610-admin-cache-headers/talkflix-web-enabled.before
+```
+
+Production paths affected:
+
+```text
+/etc/nginx/sites-available/talkflix-web
+/etc/nginx/sites-enabled/talkflix-web
+```
+
+Verification performed:
+
+```text
+nginx -t: passed
+systemctl reload nginx: passed
+curl -sSI https://talkflix.cc/admin/ returned Cache-Control: no-cache, no-store, must-revalidate
+curl -sS https://talkflix.cc/admin/ included data-page="commerce", Coaching & Products, and copyCommerceShareLink
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:

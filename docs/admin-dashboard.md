@@ -31,6 +31,20 @@ Static assets in the same folder:
 /var/www/talkflix-admin/favicon.png
 ```
 
+The canonical Nginx route is `https://talkflix.cc/admin/`. It must send no-cache headers because the dashboard is a single static HTML file and launch-time changes must appear immediately:
+
+```text
+Cache-Control: no-cache, no-store, must-revalidate
+Pragma: no-cache
+Expires: 0
+```
+
+The active production Nginx file is:
+
+```text
+/etc/nginx/sites-enabled/talkflix-web
+```
+
 This dashboard is not the same as the Flutter app and is not the React user web app at:
 
 ```text
