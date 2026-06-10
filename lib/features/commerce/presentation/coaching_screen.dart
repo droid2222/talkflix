@@ -621,6 +621,9 @@ class _QuantitySelector extends StatelessWidget {
     final safeQuantity = quantity.clamp(1, 99);
     final scheme = Theme.of(context).colorScheme;
     final color = foregroundColor ?? scheme.onSurface;
+    final disabledColor = color.withValues(alpha: 0.58);
+    final canDecrease = safeQuantity > 1;
+    final canIncrease = safeQuantity < 99;
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border.all(color: borderColor ?? scheme.outlineVariant),
@@ -631,15 +634,13 @@ class _QuantitySelector extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              visualDensity: VisualDensity.compact,
+            _QuantityIconButton(
+              symbol: '-',
+              enabled: canDecrease,
               color: color,
-              disabledColor: color.withValues(alpha: 0.32),
-              onPressed: safeQuantity <= 1
-                  ? null
-                  : () => onChanged(safeQuantity - 1),
-              icon: const Icon(Icons.remove_rounded),
+              disabledColor: disabledColor,
               tooltip: 'Decrease quantity',
+              onTap: () => onChanged(safeQuantity - 1),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -651,17 +652,59 @@ class _QuantitySelector extends StatelessWidget {
                 ),
               ),
             ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
+            _QuantityIconButton(
+              symbol: '+',
+              enabled: canIncrease,
               color: color,
-              disabledColor: color.withValues(alpha: 0.32),
-              onPressed: safeQuantity >= 99
-                  ? null
-                  : () => onChanged(safeQuantity + 1),
-              icon: const Icon(Icons.add_rounded),
+              disabledColor: disabledColor,
               tooltip: 'Increase quantity',
+              onTap: () => onChanged(safeQuantity + 1),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QuantityIconButton extends StatelessWidget {
+  const _QuantityIconButton({
+    required this.symbol,
+    required this.enabled,
+    required this.color,
+    required this.disabledColor,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final String symbol;
+  final bool enabled;
+  final Color color;
+  final Color disabledColor;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(999),
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: Center(
+            child: Text(
+              symbol,
+              style: TextStyle(
+                color: enabled ? color : disabledColor,
+                fontSize: 24,
+                fontWeight: FontWeight.w900,
+                height: 1,
+              ),
+            ),
+          ),
         ),
       ),
     );
