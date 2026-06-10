@@ -52,6 +52,7 @@ Examples of routes that must continue loading the Flutter app:
 /signup
 /app/*
 /coaching
+/coaching/<product-slug>
 /terms-of-service
 /privacy-policy
 /account-deletion
@@ -87,6 +88,7 @@ The public coaching route is web-only and public:
 
 ```text
 /coaching
+/coaching/<product-slug>
 ```
 
 It is documented in:

@@ -11,7 +11,9 @@ import '../../../app/theme/app_theme.dart';
 import '../data/commerce_repository.dart';
 
 class CoachingScreen extends ConsumerStatefulWidget {
-  const CoachingScreen({super.key});
+  const CoachingScreen({super.key, this.productSlug});
+
+  final String? productSlug;
 
   @override
   ConsumerState<CoachingScreen> createState() => _CoachingScreenState();
@@ -23,7 +25,22 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final products = ref.watch(commerceProductsProvider);
+    final cleanSlug = widget.productSlug?.trim() ?? '';
+    final products = cleanSlug.isEmpty
+        ? ref.watch(commerceProductsProvider)
+        : ref.watch(
+            commerceProductProvider(cleanSlug).select(
+              (value) => value.whenData(
+                (product) => product == null
+                    ? const <CommerceProduct>[]
+                    : <CommerceProduct>[product],
+              ),
+            ),
+          );
+    final productMissing =
+        cleanSlug.isNotEmpty &&
+        products.hasValue &&
+        (products.valueOrNull ?? const <CommerceProduct>[]).isEmpty;
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -34,6 +51,7 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
             child: _CoachingHero(
               products: products,
               checkoutBusy: _checkoutBusy,
+              productMissing: productMissing,
               onCheckout: _startCheckout,
             ),
           ),
@@ -75,11 +93,13 @@ class _CoachingHero extends StatelessWidget {
   const _CoachingHero({
     required this.products,
     required this.checkoutBusy,
+    required this.productMissing,
     required this.onCheckout,
   });
 
   final AsyncValue<List<CommerceProduct>> products;
   final bool checkoutBusy;
+  final bool productMissing;
   final ValueChanged<CommerceProduct?> onCheckout;
 
   @override
@@ -90,7 +110,8 @@ class _CoachingHero extends StatelessWidget {
     final price = product?.priceLabel.isNotEmpty == true
         ? product!.priceLabel
         : r'$28';
-    final checkoutDisabled = products.hasError || products.isLoading;
+    final checkoutDisabled =
+        products.hasError || products.isLoading || productMissing;
     final compact = MediaQuery.sizeOf(context).width < 720;
 
     return DecoratedBox(
@@ -119,7 +140,7 @@ class _CoachingHero extends StatelessWidget {
                     LayoutBuilder(
                       builder: (context, constraints) {
                         final desktop = constraints.maxWidth >= 900;
-                        final copy = _HeroCopy(price: price);
+                        final copy = _HeroCopy(product: product, price: price);
                         final card = _CheckoutCard(
                           product: product,
                           price: price,
@@ -127,6 +148,7 @@ class _CoachingHero extends StatelessWidget {
                           disabled: checkoutDisabled,
                           busy: checkoutBusy,
                           error: products.hasError,
+                          productMissing: productMissing,
                           onCheckout: () => onCheckout(product),
                         );
                         if (!desktop) {
@@ -210,8 +232,9 @@ class _CoachingTopNav extends StatelessWidget {
 }
 
 class _HeroCopy extends StatelessWidget {
-  const _HeroCopy({required this.price});
+  const _HeroCopy({required this.product, required this.price});
 
+  final CommerceProduct? product;
   final String price;
 
   @override
@@ -221,7 +244,9 @@ class _HeroCopy extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Private 1-on-1 Coaching',
+          product?.title.isNotEmpty == true
+              ? product!.title
+              : 'Private 1-on-1 Coaching',
           style: textTheme.displayLarge?.copyWith(
             color: Colors.white,
             fontWeight: FontWeight.w900,
@@ -232,7 +257,9 @@ class _HeroCopy extends StatelessWidget {
         ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 700),
           child: Text(
-            'A focused personal session with David Nwako to get clarity, direction, and a practical plan for the next step you need to take.',
+            product?.description.isNotEmpty == true
+                ? product!.description
+                : 'A focused personal session with David Nwako to get clarity, direction, and a practical plan for the next step you need to take.',
             style: textTheme.headlineSmall?.copyWith(
               color: Colors.white.withValues(alpha: 0.9),
               fontWeight: FontWeight.w700,
@@ -246,7 +273,13 @@ class _HeroCopy extends StatelessWidget {
           runSpacing: 10,
           children: [
             _HeroPill(label: '$price introductory offer'),
-            const _HeroPill(label: '1-on-1 private session'),
+            _HeroPill(
+              label: product?.type == 'ebook'
+                  ? 'Digital product'
+                  : product?.type == 'podcast_subscription'
+                  ? 'Podcast access'
+                  : '1-on-1 private session',
+            ),
             const _HeroPill(label: 'Stripe secure checkout'),
           ],
         ),
@@ -263,6 +296,7 @@ class _CheckoutCard extends StatelessWidget {
     required this.disabled,
     required this.busy,
     required this.error,
+    required this.productMissing,
     required this.onCheckout,
   });
 
@@ -272,6 +306,7 @@ class _CheckoutCard extends StatelessWidget {
   final bool disabled;
   final bool busy;
   final bool error;
+  final bool productMissing;
   final VoidCallback onCheckout;
 
   @override
@@ -298,6 +333,8 @@ class _CheckoutCard extends StatelessWidget {
             Text(
               product?.title.isNotEmpty == true
                   ? product!.title
+                  : productMissing
+                  ? 'Product unavailable'
                   : '1-on-1 Coaching',
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                 color: Colors.black,
@@ -308,6 +345,8 @@ class _CheckoutCard extends StatelessWidget {
             Text(
               product?.subtitle.isNotEmpty == true
                   ? product!.subtitle
+                  : productMissing
+                  ? 'This purchase link is no longer active.'
                   : 'Personal clarity, strategy, and next-step guidance.',
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                 color: Colors.black.withValues(alpha: 0.66),

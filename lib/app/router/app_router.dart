@@ -85,6 +85,8 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       };
       final isSharedContentRoute =
           location.startsWith('/s/') || location.startsWith('/w/');
+      final isPublicCoachingRoute =
+          location == '/coaching' || fullLocation.startsWith('/coaching/');
       final isSharedLiveRoute =
           location == '/app/live' &&
           (state.uri.queryParameters['broadcastId']?.trim().isNotEmpty ??
@@ -95,6 +97,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         if (location == '/loading' ||
             isPublicHomeRoute ||
             publicLocations.contains(location) ||
+            isPublicCoachingRoute ||
             isSharedContentRoute ||
             isSharedLiveRoute) {
           return null;
@@ -108,6 +111,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         }
         if (isPublicHomeRoute ||
             publicLocations.contains(location) ||
+            isPublicCoachingRoute ||
             isSharedContentRoute ||
             isSharedLiveRoute) {
           return null;
@@ -160,6 +164,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/coaching',
         builder: (context, state) => const CoachingScreen(),
+      ),
+      GoRoute(
+        path: '/coaching/:slug',
+        builder: (context, state) =>
+            CoachingScreen(productSlug: state.pathParameters['slug']),
       ),
       GoRoute(
         path: '/s/:token',

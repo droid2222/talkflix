@@ -11,6 +11,11 @@ final commerceProductsProvider =
       return ref.watch(commerceRepositoryProvider).fetchProducts();
     });
 
+final commerceProductProvider = FutureProvider.autoDispose
+    .family<CommerceProduct?, String>((ref, slug) {
+      return ref.watch(commerceRepositoryProvider).fetchProduct(slug);
+    });
+
 class CommerceRepository {
   CommerceRepository(this._apiClient);
 
@@ -25,6 +30,18 @@ class CommerceRepository {
         .map(CommerceProduct.fromJson)
         .where((product) => product.active)
         .toList(growable: false);
+  }
+
+  Future<CommerceProduct?> fetchProduct(String slug) async {
+    final cleanSlug = slug.trim();
+    if (cleanSlug.isEmpty) return null;
+    final json = await _apiClient.getJson(
+      '/commerce/products/${Uri.encodeComponent(cleanSlug)}',
+    );
+    final rawProduct = json['product'];
+    if (rawProduct is! Map<String, dynamic>) return null;
+    final product = CommerceProduct.fromJson(rawProduct);
+    return product.active ? product : null;
   }
 
   Future<Uri> createCheckoutSession({
@@ -66,9 +83,12 @@ class CommerceProduct {
     required this.amountCents,
     required this.priceLabel,
     required this.active,
+    required this.slug,
+    required this.shareUrl,
   });
 
   final String id;
+  final String slug;
   final String type;
   final String title;
   final String subtitle;
@@ -77,10 +97,12 @@ class CommerceProduct {
   final int amountCents;
   final String priceLabel;
   final bool active;
+  final String shareUrl;
 
   factory CommerceProduct.fromJson(Map<String, dynamic> json) {
     return CommerceProduct(
       id: json['id']?.toString() ?? '',
+      slug: json['slug']?.toString() ?? '',
       type: json['type']?.toString() ?? '',
       title: json['title']?.toString() ?? '',
       subtitle: json['subtitle']?.toString() ?? '',
@@ -89,6 +111,7 @@ class CommerceProduct {
       amountCents: _intValue(json['amountCents']),
       priceLabel: json['priceLabel']?.toString() ?? '',
       active: json['active'] != false,
+      shareUrl: json['shareUrl']?.toString() ?? '',
     );
   }
 

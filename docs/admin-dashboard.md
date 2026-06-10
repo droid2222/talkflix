@@ -1,6 +1,6 @@
 # Admin Dashboard
 
-Last verified: 2026-06-07
+Last verified: 2026-06-09
 
 This note exists so developers do not have to rediscover where the standalone admin dashboard lives.
 
@@ -73,12 +73,29 @@ GET   /admin/commerce/stripe-config
 PATCH /admin/commerce/stripe-config
 ```
 
+Coaching/product catalog:
+
+```text
+GET   /admin/commerce/products
+POST  /admin/commerce/products
+PUT   /admin/commerce/products/:id
+PATCH /admin/commerce/products/:id/archive
+```
+
 The Settings page includes a "Stripe Checkout" card where a super admin can save or clear:
 
 - Stripe secret key (`sk_live_...` or `sk_test_...`)
 - Stripe webhook secret (`whsec_...`)
 
 The dashboard never displays saved secrets. It only shows masked status and source. Saved secrets are encrypted server-side before being stored in `app_settings`. Prefer setting a stable `SECRET_ENCRYPTION_KEY` on the API server for long-term secret storage. If `STRIPE_SECRET_KEY` or `STRIPE_WEBHOOK_SECRET` is set as a server environment variable, that environment value remains the effective value.
+
+The Coaching page lets an admin create, edit, archive, search, and filter web-only products/services. Each product gets a unique public share link:
+
+```text
+https://www.talkflix.cc/coaching/<product-slug>
+```
+
+The page has a copy-link action so product links should be copied from the dashboard instead of manually typed. Archived and draft products are not public checkout links.
 
 These endpoints control the free-plan daily limits documented in:
 
@@ -92,6 +109,8 @@ Production dashboard status:
 - The card reads and saves through `/admin/pro-limits`.
 - The Settings page includes a "Stripe Checkout" card.
 - The card reads and saves through `/admin/commerce/stripe-config`.
+- The sidebar includes a "Coaching" page.
+- The Coaching page reads and saves through `/admin/commerce/products`.
 - Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-09.
 
 The reset-history route clears in-memory anonymous match history:

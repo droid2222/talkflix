@@ -25,6 +25,20 @@ Current public page:
 /coaching
 ```
 
+Specific product/service share links:
+
+```text
+/coaching/<product-slug>
+```
+
+Example:
+
+```text
+https://www.talkflix.cc/coaching/one-on-one-coaching
+```
+
+Each product has one stable `slug` and `shareUrl`. Use the admin dashboard "Coaching" page to create/edit/archive products and copy the share link. Do not hand-build links from product titles in client code.
+
 The public static homepage links to this page from `web/index.html`. Keep that link in place when editing the homepage.
 
 Flutter page source:
@@ -77,11 +91,14 @@ Public endpoints:
 
 ```text
 GET  /commerce/products
+GET  /commerce/products/:slug
 POST /commerce/checkout-sessions
 POST /stripe/webhook
 ```
 
 `GET /commerce/products` returns active public products.
+
+`GET /commerce/products/:slug` returns one active public product for a share link.
 
 `POST /commerce/checkout-sessions` creates a Stripe Checkout Session and records a pending local order.
 
@@ -92,11 +109,14 @@ POST /stripe/webhook
 The backend creates this table at startup through `ensureTables`:
 
 ```text
+commerce_products
 commerce_orders
 ```
 
 Important behavior:
 
+- Products have unique `product_key` and `slug` values.
+- Products can be `draft`, `active`, or `archived`; only active products are public.
 - Orders start as `pending`.
 - Orders become `paid` only after Stripe webhook confirmation.
 - Stripe card data is never stored by Talkflix.
@@ -109,27 +129,25 @@ Set these on the API process before taking real payments:
 STRIPE_SECRET_KEY=sk_live_xxx
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 PUBLIC_WEB_BASE_URL=https://www.talkflix.cc
-COACHING_PRODUCT_ACTIVE=true
-COACHING_PRICE_CENTS=2800
-COACHING_CURRENCY=usd
-COACHING_PRODUCT_TITLE=1-on-1 Coaching
-COACHING_PRODUCT_SUBTITLE=Personal clarity, strategy, and next-step guidance.
-COACHING_PRODUCT_DESCRIPTION=A focused private coaching session with David Nwako.
 ```
 
-Restart the API after changing these values.
+Restart the API after changing server environment values. Product titles, prices, status, and share links are now managed through the admin dashboard and do not require PM2 restart.
 
 ## Production Status
 
 Status on 2026-06-09:
 
 - Web `/coaching` route is deployed in the production Flutter bundle.
-- `GET https://api.talkflix.cc/commerce/products` returns `one_on_one_coaching`.
-- `POST https://api.talkflix.cc/commerce/checkout-sessions` reaches the API but returns `STRIPE_SECRET_KEY is not configured` until the key is saved in the admin dashboard or provided as a server environment variable.
+- Web `/coaching/one-on-one-coaching` route is deployed for direct product purchase links.
+- `GET https://api.talkflix.cc/commerce/products` returns `one_on_one_coaching` with `shareUrl`.
+- `GET https://api.talkflix.cc/commerce/products/one-on-one-coaching` returns the public product used by the share link.
+- `POST https://api.talkflix.cc/commerce/checkout-sessions` returns a Stripe Checkout URL after the Stripe secret key is configured.
 - Admin dashboard Settings includes a "Stripe Checkout" card for saving the Stripe secret key and webhook secret.
+- Admin dashboard includes a "Coaching" page for product CRUD, archive, and copy-share-link actions.
 - Production backend backup before deploying the commerce routes: `/root/talkflix-production-backups/20260609-homepage-commerce-api/server.js.before`.
+- Production backup before deploying product management and share links: `/root/talkflix-production-backups/20260609-commerce-products/`.
 
-Do not send `/coaching` to a paying client until the Stripe secret key and webhook secret are configured through the admin dashboard or as production env vars. PM2 restart is only required for env var changes, not for dashboard-saved secrets.
+Use direct product links such as `/coaching/one-on-one-coaching` for specific services. Use `/coaching` as the general coaching catalog entry point.
 
 Dashboard-saved Stripe secrets are encrypted in `app_settings`, masked on read, and never returned to the browser after saving.
 
@@ -149,6 +167,7 @@ https://api.talkflix.cc/stripe/webhook
 
 - Enable at least `checkout.session.completed`, `checkout.session.expired`, and `checkout.session.async_payment_failed`.
 - Confirm `GET https://api.talkflix.cc/commerce/products` returns `one_on_one_coaching`.
+- Confirm `GET https://api.talkflix.cc/commerce/products/one-on-one-coaching` returns the specific product.
 - Confirm `POST https://api.talkflix.cc/commerce/checkout-sessions` returns a Stripe Checkout URL.
 - Confirm successful test payment marks the order as `paid` in `commerce_orders`.
 
@@ -156,10 +175,10 @@ https://api.talkflix.cc/stripe/webhook
 
 If ebooks or podcast subscriptions are added:
 
-- Add product definitions on the backend first.
+- Add products through the admin dashboard first.
 - Keep product visibility controlled server-side.
 - Use Stripe webhooks as the source of truth for access.
-- Add admin dashboard controls before allowing non-technical price/content changes.
+- Reuse the existing `/coaching/<slug>` share-link pattern unless a future route family is intentionally introduced.
 
 If other coaches are allowed to sell:
 

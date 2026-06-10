@@ -313,6 +313,50 @@ server-local /commerce/checkout-sessions still returned STRIPE_SECRET_KEY is not
 production admin index.html contained Stripe Checkout, stripe-config, and stripeSecretKeyInput
 ```
 
+### 2026-06-09 Commerce Products And Share Links Deployment Backup
+
+Reason:
+
+- Added persistent `commerce_products` catalog support to the backend.
+- Added public product links at `/coaching/<product-slug>`.
+- Added protected admin product routes for create, edit, list, and archive.
+- Added a standalone admin dashboard "Coaching" page with copy-share-link actions.
+- Updated the Flutter web coaching screen so a specific share link loads the matching product and checkout CTA.
+
+Fresh protected backups created:
+
+```text
+/root/talkflix-production-backups/20260609-commerce-products/server.js.before
+/root/talkflix-production-backups/20260609-commerce-products/admin-index.html.before
+/root/talkflix-production-backups/20260609-commerce-products/talkflix-web-before.tar.gz
+```
+
+Production paths affected:
+
+```text
+/opt/talkflix-api/server.js
+/var/www/talkflix-admin/index.html
+/var/www/talkflix-web
+```
+
+Verification performed:
+
+```text
+dart analyze edited Dart files: passed
+node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+admin dashboard inline script syntax check: passed
+tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api --update-env: passed
+server-local /health returned {"ok":true}
+server-local /commerce/products returned one_on_one_coaching with shareUrl https://www.talkflix.cc/coaching/one-on-one-coaching
+server-local /commerce/products/one-on-one-coaching returned the matching public product
+server-local /admin/commerce/products returned 401 without auth, confirming the route is registered and protected
+server-local /commerce/checkout-sessions returned a Stripe Checkout URL
+production admin index.html contained Coaching & Products, /admin/commerce/products, and copyCommerceShareLink
+browser test: https://www.talkflix.cc/coaching/one-on-one-coaching rendered the 1-on-1 Coaching product and Book with Stripe CTA
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:
