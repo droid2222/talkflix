@@ -430,6 +430,51 @@ browser test: https://www.talkflix.cc/coaching showed Advanced American English 
 browser test: https://www.talkflix.cc/coaching/advanced-american-english rendered the new service direct purchase page with no console errors
 ```
 
+### 2026-06-10 Commerce Catalog Search Quantity Delete Deployment Backup
+
+Reason:
+
+- Changed `/coaching` into a neutral searchable catalog instead of letting the first active service own the page hero.
+- Preserved `/coaching/<product-slug>` as the focused direct product/service page.
+- Added product quantity controls to catalog cards and direct product checkout cards.
+- Sent checkout quantity to Stripe and recorded quantity on `commerce_orders`.
+- Removed cover image placement from the white direct checkout card above the Stripe button.
+- Added permanent admin delete for commerce products alongside archive.
+
+Fresh protected backups created:
+
+```text
+/root/talkflix-production-backups/20260610-commerce-catalog-search-quantity-delete/server.js.before
+/root/talkflix-production-backups/20260610-commerce-catalog-search-quantity-delete/admin-index.html.before
+/root/talkflix-production-backups/20260610-commerce-catalog-search-quantity-delete/talkflix-web-before.tar.gz
+```
+
+Production paths affected:
+
+```text
+/opt/talkflix-api/server.js
+/var/www/talkflix-admin/index.html
+/var/www/talkflix-web
+```
+
+Verification performed:
+
+```text
+dart analyze edited commerce Dart files: passed
+node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+admin dashboard inline script syntax check: passed
+tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api --update-env: passed
+GET https://api.talkflix.cc/health returned {"ok":true}
+GET https://api.talkflix.cc/commerce/products returned active products with imageUrl/shareUrl
+DELETE https://api.talkflix.cc/admin/commerce/products/1 returned 401 without auth, confirming the route is protected
+POST https://api.talkflix.cc/commerce/checkout-sessions with quantity 2 returned a Stripe Checkout URL
+browser test: https://www.talkflix.cc/coaching showed a neutral catalog page with a search bar
+browser test: https://www.talkflix.cc/coaching/advanced-american-english rendered the direct product page without the cover image above the Stripe button
+browser test: direct product quantity plus button changed Qty 1 to Qty 2
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:

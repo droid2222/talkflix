@@ -94,6 +94,7 @@ GET   /admin/commerce/products
 POST  /admin/commerce/products
 PUT   /admin/commerce/products/:id
 PATCH /admin/commerce/products/:id/archive
+DELETE /admin/commerce/products/:id
 POST  /admin/commerce/upload-image
 ```
 
@@ -104,13 +105,13 @@ The Settings page includes a "Stripe Checkout" card where a super admin can save
 
 The dashboard never displays saved secrets. It only shows masked status and source. Saved secrets are encrypted server-side before being stored in `app_settings`. Prefer setting a stable `SECRET_ENCRYPTION_KEY` on the API server for long-term secret storage. If `STRIPE_SECRET_KEY` or `STRIPE_WEBHOOK_SECRET` is set as a server environment variable, that environment value remains the effective value.
 
-The Coaching page lets an admin create, edit, archive, search, and filter web-only products/services. Each product gets a unique public share link:
+The Coaching page lets an admin create, edit, archive, delete, search, and filter web-only products/services. Each product gets a unique public share link:
 
 ```text
 https://www.talkflix.cc/coaching/<product-slug>
 ```
 
-The page has a copy-link action so product links should be copied from the dashboard instead of manually typed. Archived and draft products are not public checkout links.
+The page has a copy-link action so product links should be copied from the dashboard instead of manually typed. Archived and draft products are not public checkout links. Delete is permanent and requires typing `DELETE` in the browser prompt.
 
 The product editor includes a cover image URL field, upload button, and preview. Uploaded product covers use `/admin/commerce/upload-image`, are stored under `/uploads/...`, and are returned publicly as `imageUrl`.
 

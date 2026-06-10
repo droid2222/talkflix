@@ -22,6 +22,8 @@ class CoachingScreen extends ConsumerStatefulWidget {
 
 class _CoachingScreenState extends ConsumerState<CoachingScreen> {
   static const _fallbackProductId = 'one_on_one_coaching';
+  final Map<String, int> _quantities = <String, int>{};
+  String _catalogQuery = '';
   bool _checkoutBusy = false;
 
   @override
@@ -29,20 +31,49 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
     final cleanSlug = widget.productSlug?.trim() ?? '';
     final products = cleanSlug.isEmpty
         ? ref.watch(commerceProductsProvider)
-        : ref.watch(
-            commerceProductProvider(cleanSlug).select(
-              (value) => value.whenData(
+        : ref
+              .watch(commerceProductProvider(cleanSlug))
+              .whenData(
                 (product) => product == null
                     ? const <CommerceProduct>[]
                     : <CommerceProduct>[product],
-              ),
-            ),
-          );
+              );
     final productMissing =
         cleanSlug.isNotEmpty &&
         products.hasValue &&
         (products.valueOrNull ?? const <CommerceProduct>[]).isEmpty;
     final scheme = Theme.of(context).colorScheme;
+
+    if (cleanSlug.isEmpty) {
+      return Scaffold(
+        backgroundColor: scheme.surface,
+        body: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: _CommerceCatalogHeader(
+                query: _catalogQuery,
+                onQueryChanged: (value) {
+                  setState(() => _catalogQuery = value);
+                },
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: _CommerceProductCatalog(
+                products: products,
+                query: _catalogQuery,
+                checkoutBusy: _checkoutBusy,
+                quantityFor: _quantityFor,
+                onQuantityChanged: _setQuantity,
+                onCheckout: (product) {
+                  _startCheckout(product, quantity: _quantityFor(product));
+                },
+              ),
+            ),
+            const SliverToBoxAdapter(child: _CoachingFooter()),
+          ],
+        ),
+      );
+    }
 
     return Scaffold(
       backgroundColor: scheme.surface,
@@ -53,16 +84,13 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
               products: products,
               checkoutBusy: _checkoutBusy,
               productMissing: productMissing,
-              onCheckout: _startCheckout,
+              quantityFor: _quantityFor,
+              onQuantityChanged: _setQuantity,
+              onCheckout: (product) {
+                _startCheckout(product, quantity: _quantityFor(product));
+              },
             ),
           ),
-          if (cleanSlug.isEmpty)
-            SliverToBoxAdapter(
-              child: _CommerceProductCatalog(
-                products: products,
-                onCheckout: _startCheckout,
-              ),
-            ),
           const SliverToBoxAdapter(child: _CoachingOutcomes()),
           const SliverToBoxAdapter(child: _CoachingDetails()),
           const SliverToBoxAdapter(child: _CoachingFaq()),
@@ -72,13 +100,30 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
     );
   }
 
-  Future<void> _startCheckout(CommerceProduct? product) async {
+  int _quantityFor(CommerceProduct? product) {
+    final key = product?.id ?? _fallbackProductId;
+    return (_quantities[key] ?? 1).clamp(1, 99);
+  }
+
+  void _setQuantity(CommerceProduct product, int quantity) {
+    setState(() {
+      _quantities[product.id] = quantity.clamp(1, 99);
+    });
+  }
+
+  Future<void> _startCheckout(
+    CommerceProduct? product, {
+    int quantity = 1,
+  }) async {
     if (_checkoutBusy) return;
     setState(() => _checkoutBusy = true);
     try {
       final uri = await ref
           .read(commerceRepositoryProvider)
-          .createCheckoutSession(productId: product?.id ?? _fallbackProductId);
+          .createCheckoutSession(
+            productId: product?.id ?? _fallbackProductId,
+            quantity: quantity,
+          );
       final opened = await launchUrl(uri, webOnlyWindowName: '_self');
       if (!opened) {
         throw StateError('Could not open Stripe Checkout.');
@@ -102,12 +147,16 @@ class _CoachingHero extends StatelessWidget {
     required this.products,
     required this.checkoutBusy,
     required this.productMissing,
+    required this.quantityFor,
+    required this.onQuantityChanged,
     required this.onCheckout,
   });
 
   final AsyncValue<List<CommerceProduct>> products;
   final bool checkoutBusy;
   final bool productMissing;
+  final int Function(CommerceProduct? product) quantityFor;
+  final void Function(CommerceProduct product, int quantity) onQuantityChanged;
   final ValueChanged<CommerceProduct?> onCheckout;
 
   @override
@@ -150,11 +199,16 @@ class _CoachingHero extends StatelessWidget {
                         final card = _CheckoutCard(
                           product: product,
                           price: price,
+                          quantity: quantityFor(product),
                           loading: products.isLoading,
                           disabled: checkoutDisabled,
                           busy: checkoutBusy,
                           error: products.hasError,
                           productMissing: productMissing,
+                          onQuantityChanged: product == null
+                              ? null
+                              : (quantity) =>
+                                    onQuantityChanged(product, quantity),
                           onCheckout: () => onCheckout(product),
                         );
                         if (!desktop) {
@@ -184,13 +238,122 @@ class _CoachingHero extends StatelessWidget {
   }
 }
 
+class _CommerceCatalogHeader extends StatelessWidget {
+  const _CommerceCatalogHeader({
+    required this.query,
+    required this.onQueryChanged,
+  });
+
+  final String query;
+  final ValueChanged<String> onQueryChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 720;
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        color: Color(0xFF101113),
+        image: DecorationImage(
+          image: AssetImage('assets/images/live_room_bg.png'),
+          fit: BoxFit.cover,
+          opacity: 0.12,
+        ),
+      ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.72)),
+        child: SafeArea(
+          bottom: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1180),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(20, 18, 20, compact ? 48 : 74),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const _CoachingTopNav(),
+                    SizedBox(height: compact ? 46 : 74),
+                    Text(
+                      'Coaching, courses, and digital products',
+                      style: Theme.of(context).textTheme.displayLarge?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        height: 0.98,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Search the catalog and choose the service or product that fits what you need. No single offer owns this page.',
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.86),
+                            fontWeight: FontWeight.w700,
+                            height: 1.28,
+                          ),
+                    ),
+                    const SizedBox(height: 30),
+                    TextField(
+                      controller: TextEditingController(text: query)
+                        ..selection = TextSelection.collapsed(
+                          offset: query.length,
+                        ),
+                      onChanged: onQueryChanged,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: 'Search services, courses, ebooks...',
+                        hintStyle: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.58),
+                        ),
+                        prefixIcon: const Icon(
+                          Icons.search_rounded,
+                          color: Colors.white,
+                        ),
+                        filled: true,
+                        fillColor: Colors.white.withValues(alpha: 0.12),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.22),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: const BorderSide(
+                            color: talkflixPrimary,
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CommerceProductCatalog extends StatelessWidget {
   const _CommerceProductCatalog({
     required this.products,
+    required this.query,
+    required this.checkoutBusy,
+    required this.quantityFor,
+    required this.onQuantityChanged,
     required this.onCheckout,
   });
 
   final AsyncValue<List<CommerceProduct>> products;
+  final String query;
+  final bool checkoutBusy;
+  final int Function(CommerceProduct product) quantityFor;
+  final void Function(CommerceProduct product, int quantity) onQuantityChanged;
   final ValueChanged<CommerceProduct> onCheckout;
 
   @override
@@ -202,9 +365,9 @@ class _CommerceProductCatalog extends StatelessWidget {
         children: [
           const _SectionHeader(
             eyebrow: 'Available offers',
-            title: 'Choose the service or product you want to buy',
+            title: 'All available offers',
             copy:
-                'Each active service has its own purchase page and Stripe checkout link. Use the exact product link when sending a client to a specific offer.',
+                'Each active item has its own purchase page and Stripe checkout link. Use search to narrow the catalog.',
           ),
           const SizedBox(height: 26),
           products.when(
@@ -222,9 +385,22 @@ class _CommerceProductCatalog extends StatelessWidget {
               ),
             ),
             data: (items) {
-              if (items.isEmpty) {
+              final normalizedQuery = query.trim().toLowerCase();
+              final visibleItems = normalizedQuery.isEmpty
+                  ? items
+                  : items
+                        .where((product) {
+                          final haystack =
+                              '${product.title} ${product.subtitle} ${product.description} ${product.type}'
+                                  .toLowerCase();
+                          return haystack.contains(normalizedQuery);
+                        })
+                        .toList(growable: false);
+              if (visibleItems.isEmpty) {
                 return Text(
-                  'No active products are available yet.',
+                  items.isEmpty
+                      ? 'No active products are available yet.'
+                      : 'No matching products found.',
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -246,11 +422,15 @@ class _CommerceProductCatalog extends StatelessWidget {
                       mainAxisSpacing: 16,
                       childAspectRatio: columns == 1 ? 1.08 : 0.82,
                     ),
-                    itemCount: items.length,
+                    itemCount: visibleItems.length,
                     itemBuilder: (context, index) {
-                      final product = items[index];
+                      final product = visibleItems[index];
                       return _CommerceProductTile(
                         product: product,
+                        checkoutBusy: checkoutBusy,
+                        quantity: quantityFor(product),
+                        onQuantityChanged: (quantity) =>
+                            onQuantityChanged(product, quantity),
                         onCheckout: () => onCheckout(product),
                       );
                     },
@@ -266,9 +446,18 @@ class _CommerceProductCatalog extends StatelessWidget {
 }
 
 class _CommerceProductTile extends StatelessWidget {
-  const _CommerceProductTile({required this.product, required this.onCheckout});
+  const _CommerceProductTile({
+    required this.product,
+    required this.checkoutBusy,
+    required this.quantity,
+    required this.onQuantityChanged,
+    required this.onCheckout,
+  });
 
   final CommerceProduct product;
+  final bool checkoutBusy;
+  final int quantity;
+  final ValueChanged<int> onQuantityChanged;
   final VoidCallback onCheckout;
 
   @override
@@ -326,16 +515,25 @@ class _CommerceProductTile extends StatelessWidget {
                           ?.copyWith(fontWeight: FontWeight.w900),
                     ),
                     const SizedBox(height: 12),
+                    _QuantitySelector(
+                      quantity: quantity,
+                      onChanged: onQuantityChanged,
+                    ),
+                    const SizedBox(height: 12),
                     Row(
                       children: [
                         Expanded(
                           child: FilledButton(
-                            onPressed: kIsWeb ? onCheckout : null,
+                            onPressed: kIsWeb && !checkoutBusy
+                                ? onCheckout
+                                : null,
                             style: FilledButton.styleFrom(
                               backgroundColor: talkflixPrimary,
                               foregroundColor: Colors.white,
                             ),
-                            child: const Text('Buy now'),
+                            child: Text(
+                              checkoutBusy ? 'Opening...' : 'Buy now',
+                            ),
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -399,6 +597,71 @@ class _CommerceProductImage extends StatelessWidget {
         child: const Icon(
           Icons.image_not_supported_outlined,
           color: Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+class _QuantitySelector extends StatelessWidget {
+  const _QuantitySelector({
+    required this.quantity,
+    required this.onChanged,
+    this.foregroundColor,
+    this.borderColor,
+  });
+
+  final int quantity;
+  final ValueChanged<int> onChanged;
+  final Color? foregroundColor;
+  final Color? borderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final safeQuantity = quantity.clamp(1, 99);
+    final scheme = Theme.of(context).colorScheme;
+    final color = foregroundColor ?? scheme.onSurface;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: borderColor ?? scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              color: color,
+              disabledColor: color.withValues(alpha: 0.32),
+              onPressed: safeQuantity <= 1
+                  ? null
+                  : () => onChanged(safeQuantity - 1),
+              icon: const Icon(Icons.remove_rounded),
+              tooltip: 'Decrease quantity',
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Text(
+                'Qty $safeQuantity',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              color: color,
+              disabledColor: color.withValues(alpha: 0.32),
+              onPressed: safeQuantity >= 99
+                  ? null
+                  : () => onChanged(safeQuantity + 1),
+              icon: const Icon(Icons.add_rounded),
+              tooltip: 'Increase quantity',
+            ),
+          ],
         ),
       ),
     );
@@ -519,21 +782,25 @@ class _CheckoutCard extends StatelessWidget {
   const _CheckoutCard({
     required this.product,
     required this.price,
+    required this.quantity,
     required this.loading,
     required this.disabled,
     required this.busy,
     required this.error,
     required this.productMissing,
+    required this.onQuantityChanged,
     required this.onCheckout,
   });
 
   final CommerceProduct? product;
   final String price;
+  final int quantity;
   final bool loading;
   final bool disabled;
   final bool busy;
   final bool error;
   final bool productMissing;
+  final ValueChanged<int>? onQuantityChanged;
   final VoidCallback onCheckout;
 
   @override
@@ -557,13 +824,6 @@ class _CheckoutCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if ((product?.imageUrl.trim() ?? '').isNotEmpty) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: _CommerceProductImage(product: product, height: 190),
-              ),
-              const SizedBox(height: 20),
-            ],
             Text(
               product?.title.isNotEmpty == true
                   ? product!.title
@@ -596,6 +856,15 @@ class _CheckoutCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
+            if (product != null && onQuantityChanged != null) ...[
+              _QuantitySelector(
+                quantity: quantity,
+                onChanged: onQuantityChanged!,
+                foregroundColor: Colors.black,
+                borderColor: Colors.black.withValues(alpha: 0.16),
+              ),
+              const SizedBox(height: 18),
+            ],
             FilledButton.icon(
               onPressed: disabled || busy || !kIsWeb ? null : onCheckout,
               icon: busy

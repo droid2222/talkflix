@@ -46,6 +46,7 @@ class CommerceRepository {
 
   Future<Uri> createCheckoutSession({
     required String productId,
+    required int quantity,
     String? customerEmail,
     String? customerName,
     String? note,
@@ -54,6 +55,7 @@ class CommerceRepository {
       '/commerce/checkout-sessions',
       body: <String, dynamic>{
         'productId': productId,
+        'quantity': quantity.clamp(1, 99),
         if ((customerEmail ?? '').trim().isNotEmpty)
           'customerEmail': customerEmail!.trim(),
         if ((customerName ?? '').trim().isNotEmpty)

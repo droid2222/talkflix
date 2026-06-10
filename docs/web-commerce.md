@@ -39,9 +39,11 @@ https://www.talkflix.cc/coaching/one-on-one-coaching
 
 Each product has one stable `slug` and `shareUrl`. Use the admin dashboard "Coaching" page to create/edit/archive products and copy the share link. Do not hand-build links from product titles in client code.
 
-The generic `/coaching` page shows the active product catalog. A direct `/coaching/<product-slug>` link shows only the selected product/service.
+The generic `/coaching` page shows a neutral searchable active product catalog. It must not be owned by or visually centered on one specific service. A direct `/coaching/<product-slug>` link shows only the selected product/service.
 
 Products can include a cover image through `imageUrl`. Admins can upload a cover image from the Coaching product editor or paste an HTTPS image URL. Uploaded covers are stored under `/uploads/...` on the API server and rendered publicly through the app media URL resolver.
+
+Checkout supports quantity. The selected quantity is sent to Stripe Checkout and recorded on the local commerce order.
 
 The public static homepage links to this page from `web/index.html`. Keep that link in place when editing the homepage.
 
@@ -108,6 +110,8 @@ Public product responses include `imageUrl` when a cover image has been configur
 
 `POST /commerce/checkout-sessions` creates a Stripe Checkout Session and records a pending local order.
 
+`POST /commerce/checkout-sessions` accepts `quantity` from 1 to 99.
+
 `POST /stripe/webhook` verifies the Stripe webhook signature when `STRIPE_WEBHOOK_SECRET` is configured, then marks the matching order paid, expired, or failed.
 
 ## Database
@@ -124,6 +128,7 @@ Important behavior:
 - Products have unique `product_key` and `slug` values.
 - Products can be `draft`, `active`, or `archived`; only active products are public.
 - Orders start as `pending`.
+- Orders record the selected checkout quantity.
 - Orders become `paid` only after Stripe webhook confirmation.
 - Stripe card data is never stored by Talkflix.
 
