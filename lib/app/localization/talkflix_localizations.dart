@@ -244,6 +244,12 @@ class TalkflixLocalizations {
       _t('talkflixId', 'Talkflix ID', arabic: 'معرّف Talkflix');
   String get email => _t('email', 'Email', arabic: 'البريد الإلكتروني');
   String get password => _t('password', 'Password', arabic: 'كلمة المرور');
+  String get show => _t('show', 'Show', arabic: 'إظهار');
+  String get hide => _t('hide', 'Hide', arabic: 'إخفاء');
+  String get showPassword =>
+      _t('showPassword', 'Show password', arabic: 'إظهار كلمة المرور');
+  String get hidePassword =>
+      _t('hidePassword', 'Hide password', arabic: 'إخفاء كلمة المرور');
   String get bindMoreLoginMethods => _t(
     'bindMoreLoginMethods',
     'Bind more login methods to ensure account security.',

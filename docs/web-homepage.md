@@ -122,7 +122,7 @@ For Flutter web releases, use the guarded build command instead of raw `flutter 
 tool/build_web_preserving_homepage.sh
 ```
 
-The guarded build checks `web/index.html`, runs the Flutter build, copies the static homepage into `build/web/index.html`, and checks the built output again.
+The guarded build checks `web/index.html`, runs the Flutter build, preserves the generated Flutter shell as `build/web/app-index.html` and `build/web/share-index.html`, copies the static homepage into `build/web/index.html`, and checks the built output again.
 
 ## Safe Change Checklist
 

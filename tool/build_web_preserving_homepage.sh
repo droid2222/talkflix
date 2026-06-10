@@ -7,6 +7,8 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 flutter build web --release "$@"
 
+cp "$ROOT_DIR/build/web/index.html" "$ROOT_DIR/build/web/app-index.html"
+cp "$ROOT_DIR/build/web/index.html" "$ROOT_DIR/build/web/share-index.html"
 cp "$ROOT_DIR/web/index.html" "$ROOT_DIR/build/web/index.html"
 "$ROOT_DIR/tool/check_web_homepage.sh" "$ROOT_DIR/build/web/index.html"
 

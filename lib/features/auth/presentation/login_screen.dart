@@ -236,7 +236,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 }
 
-class _AuthInput extends StatelessWidget {
+class _AuthInput extends StatefulWidget {
   const _AuthInput({
     required this.controller,
     required this.hintText,
@@ -250,12 +250,40 @@ class _AuthInput extends StatelessWidget {
   final bool obscureText;
 
   @override
+  State<_AuthInput> createState() => _AuthInputState();
+}
+
+class _AuthInputState extends State<_AuthInput> {
+  late bool _obscured = widget.obscureText;
+
+  void _toggleObscured() {
+    setState(() => _obscured = !_obscured);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return TextField(
-      controller: controller,
-      keyboardType: keyboardType,
-      obscureText: obscureText,
-      decoration: InputDecoration(hintText: hintText),
+      controller: widget.controller,
+      keyboardType: widget.keyboardType,
+      obscureText: _obscured,
+      decoration: InputDecoration(
+        hintText: widget.hintText,
+        suffixIconConstraints: widget.obscureText
+            ? const BoxConstraints(minWidth: 88, minHeight: 0)
+            : null,
+        suffixIcon: widget.obscureText
+            ? TextButton(
+                onPressed: _toggleObscured,
+                style: TextButton.styleFrom(
+                  foregroundColor: talkflixPrimary,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(_obscured ? l10n.show : l10n.hide),
+              )
+            : null,
+      ),
     );
   }
 }
