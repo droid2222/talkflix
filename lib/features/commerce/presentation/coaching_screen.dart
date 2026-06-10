@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/media/media_utils.dart';
 import '../../../core/navigation/public_home_navigation.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../app/theme/app_theme.dart';
@@ -55,6 +56,13 @@ class _CoachingScreenState extends ConsumerState<CoachingScreen> {
               onCheckout: _startCheckout,
             ),
           ),
+          if (cleanSlug.isEmpty)
+            SliverToBoxAdapter(
+              child: _CommerceProductCatalog(
+                products: products,
+                onCheckout: _startCheckout,
+              ),
+            ),
           const SliverToBoxAdapter(child: _CoachingOutcomes()),
           const SliverToBoxAdapter(child: _CoachingDetails()),
           const SliverToBoxAdapter(child: _CoachingFaq()),
@@ -104,9 +112,7 @@ class _CoachingHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final product = products.valueOrNull
-        ?.where((item) => item.id == _CoachingScreenState._fallbackProductId)
-        .firstOrNull;
+    final product = products.valueOrNull?.firstOrNull;
     final price = product?.priceLabel.isNotEmpty == true
         ? product!.priceLabel
         : r'$28';
@@ -172,6 +178,227 @@ class _CoachingHero extends StatelessWidget {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommerceProductCatalog extends StatelessWidget {
+  const _CommerceProductCatalog({
+    required this.products,
+    required this.onCheckout,
+  });
+
+  final AsyncValue<List<CommerceProduct>> products;
+  final ValueChanged<CommerceProduct> onCheckout;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _CoachingBand(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SectionHeader(
+            eyebrow: 'Available offers',
+            title: 'Choose the service or product you want to buy',
+            copy:
+                'Each active service has its own purchase page and Stripe checkout link. Use the exact product link when sending a client to a specific offer.',
+          ),
+          const SizedBox(height: 26),
+          products.when(
+            loading: () => const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: CircularProgressIndicator(),
+              ),
+            ),
+            error: (_, _) => Text(
+              'Products could not be loaded right now.',
+              style: TextStyle(
+                color: scheme.error,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            data: (items) {
+              if (items.isEmpty) {
+                return Text(
+                  'No active products are available yet.',
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                );
+              }
+              return LayoutBuilder(
+                builder: (context, constraints) {
+                  final columns = constraints.maxWidth >= 940
+                      ? 3
+                      : constraints.maxWidth >= 640
+                      ? 2
+                      : 1;
+                  return GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: columns,
+                      crossAxisSpacing: 16,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: columns == 1 ? 1.08 : 0.82,
+                    ),
+                    itemCount: items.length,
+                    itemBuilder: (context, index) {
+                      final product = items[index];
+                      return _CommerceProductTile(
+                        product: product,
+                        onCheckout: () => onCheckout(product),
+                      );
+                    },
+                  );
+                },
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CommerceProductTile extends StatelessWidget {
+  const _CommerceProductTile({required this.product, required this.onCheckout});
+
+  final CommerceProduct product;
+  final VoidCallback onCheckout;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.07),
+            blurRadius: 20,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _CommerceProductImage(product: product, height: 170),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      product.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      product.subtitle.isNotEmpty
+                          ? product.subtitle
+                          : product.description,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                        height: 1.38,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      product.priceLabel,
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: kIsWeb ? onCheckout : null,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: talkflixPrimary,
+                              foregroundColor: Colors.white,
+                            ),
+                            child: const Text('Buy now'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        OutlinedButton(
+                          onPressed: () =>
+                              context.go('/coaching/${product.slug}'),
+                          child: const Text('View'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CommerceProductImage extends StatelessWidget {
+  const _CommerceProductImage({required this.product, required this.height});
+
+  final CommerceProduct? product;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = product?.imageUrl.trim() ?? '';
+    if (imageUrl.isEmpty) {
+      return Container(
+        height: height,
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF18191D), Color(0xFF4A0D12)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: const Center(
+          child: Icon(
+            Icons.auto_awesome_rounded,
+            color: Colors.white,
+            size: 42,
+          ),
+        ),
+      );
+    }
+    return Image.network(
+      resolveMediaUrl(imageUrl),
+      height: height,
+      width: double.infinity,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => Container(
+        height: height,
+        width: double.infinity,
+        color: const Color(0xFF18191D),
+        alignment: Alignment.center,
+        child: const Icon(
+          Icons.image_not_supported_outlined,
+          color: Colors.white,
         ),
       ),
     );
@@ -330,6 +557,13 @@ class _CheckoutCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
+            if ((product?.imageUrl.trim() ?? '').isNotEmpty) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: _CommerceProductImage(product: product, height: 190),
+              ),
+              const SizedBox(height: 20),
+            ],
             Text(
               product?.title.isNotEmpty == true
                   ? product!.title

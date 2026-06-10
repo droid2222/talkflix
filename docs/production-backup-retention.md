@@ -387,6 +387,49 @@ curl -sSI https://talkflix.cc/admin/ returned Cache-Control: no-cache, no-store,
 curl -sS https://talkflix.cc/admin/ included data-page="commerce", Coaching & Products, and copyCommerceShareLink
 ```
 
+### 2026-06-10 Commerce Cover Images And Catalog Deployment Backup
+
+Reason:
+
+- Added `image_url` support to `commerce_products`.
+- Added public `imageUrl` fields to commerce product API responses.
+- Added an admin commerce image upload endpoint and cover image fields in the Coaching product editor.
+- Updated `/coaching` to show the active product catalog instead of only the original default product.
+- Preserved `/coaching/<product-slug>` as a focused direct purchase page for one product/service.
+
+Fresh protected backups created:
+
+```text
+/root/talkflix-production-backups/20260610-commerce-cover-catalog/server.js.before
+/root/talkflix-production-backups/20260610-commerce-cover-catalog/admin-index.html.before
+/root/talkflix-production-backups/20260610-commerce-cover-catalog/talkflix-web-before.tar.gz
+```
+
+Production paths affected:
+
+```text
+/opt/talkflix-api/server.js
+/var/www/talkflix-admin/index.html
+/var/www/talkflix-web
+```
+
+Verification performed:
+
+```text
+dart analyze edited commerce Dart files: passed
+node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+admin dashboard inline script syntax check: passed
+tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api --update-env: passed
+GET https://api.talkflix.cc/health returned {"ok":true}
+GET https://api.talkflix.cc/commerce/products returned Advanced American English and 1-on-1 Coaching with imageUrl fields
+POST https://api.talkflix.cc/admin/commerce/upload-image returned 401 without auth, confirming the route is protected
+production admin index.html contained Cover, commerceProductImageUrl, /admin/commerce/upload-image, and imageUrl
+browser test: https://www.talkflix.cc/coaching showed Advanced American English in the hero and both active products in the catalog
+browser test: https://www.talkflix.cc/coaching/advanced-american-english rendered the new service direct purchase page with no console errors
+```
+
 ### 2026-06-05 Backup Folder Cleanup
 
 Reason:

@@ -39,6 +39,10 @@ https://www.talkflix.cc/coaching/one-on-one-coaching
 
 Each product has one stable `slug` and `shareUrl`. Use the admin dashboard "Coaching" page to create/edit/archive products and copy the share link. Do not hand-build links from product titles in client code.
 
+The generic `/coaching` page shows the active product catalog. A direct `/coaching/<product-slug>` link shows only the selected product/service.
+
+Products can include a cover image through `imageUrl`. Admins can upload a cover image from the Coaching product editor or paste an HTTPS image URL. Uploaded covers are stored under `/uploads/...` on the API server and rendered publicly through the app media URL resolver.
+
 The public static homepage links to this page from `web/index.html`. Keep that link in place when editing the homepage.
 
 Flutter page source:
@@ -99,6 +103,8 @@ POST /stripe/webhook
 `GET /commerce/products` returns active public products.
 
 `GET /commerce/products/:slug` returns one active public product for a share link.
+
+Public product responses include `imageUrl` when a cover image has been configured.
 
 `POST /commerce/checkout-sessions` creates a Stripe Checkout Session and records a pending local order.
 

@@ -94,6 +94,7 @@ GET   /admin/commerce/products
 POST  /admin/commerce/products
 PUT   /admin/commerce/products/:id
 PATCH /admin/commerce/products/:id/archive
+POST  /admin/commerce/upload-image
 ```
 
 The Settings page includes a "Stripe Checkout" card where a super admin can save or clear:
@@ -111,6 +112,8 @@ https://www.talkflix.cc/coaching/<product-slug>
 
 The page has a copy-link action so product links should be copied from the dashboard instead of manually typed. Archived and draft products are not public checkout links.
 
+The product editor includes a cover image URL field, upload button, and preview. Uploaded product covers use `/admin/commerce/upload-image`, are stored under `/uploads/...`, and are returned publicly as `imageUrl`.
+
 These endpoints control the free-plan daily limits documented in:
 
 ```text
@@ -125,7 +128,8 @@ Production dashboard status:
 - The card reads and saves through `/admin/commerce/stripe-config`.
 - The sidebar includes a "Coaching" page.
 - The Coaching page reads and saves through `/admin/commerce/products`.
-- Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-09.
+- The Coaching product editor supports cover image upload and preview.
+- Last deployed to `/var/www/talkflix-admin/index.html` on 2026-06-10.
 
 The reset-history route clears in-memory anonymous match history:
 

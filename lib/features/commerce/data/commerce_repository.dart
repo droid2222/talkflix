@@ -79,6 +79,7 @@ class CommerceProduct {
     required this.title,
     required this.subtitle,
     required this.description,
+    required this.imageUrl,
     required this.currency,
     required this.amountCents,
     required this.priceLabel,
@@ -93,6 +94,7 @@ class CommerceProduct {
   final String title;
   final String subtitle;
   final String description;
+  final String imageUrl;
   final String currency;
   final int amountCents;
   final String priceLabel;
@@ -107,6 +109,7 @@ class CommerceProduct {
       title: json['title']?.toString() ?? '',
       subtitle: json['subtitle']?.toString() ?? '',
       description: json['description']?.toString() ?? '',
+      imageUrl: json['imageUrl']?.toString() ?? '',
       currency: json['currency']?.toString() ?? 'USD',
       amountCents: _intValue(json['amountCents']),
       priceLabel: json['priceLabel']?.toString() ?? '',
