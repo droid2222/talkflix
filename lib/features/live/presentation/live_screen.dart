@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:go_router/go_router.dart';
+import 'package:livekit_client/livekit_client.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -84,12 +85,18 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   final _reactionController = StreamController<String>.broadcast();
   static const _audioRoomPanel = Color(0xFF2C1E00);
   static const _audioRoomAccent = talkflixPrimary;
+  static const _liveExitRed = Color(0xFFDC2626);
+  static const _liveExitRedBright = Color(0xFFEF4444);
   RTCVideoRenderer? _localRenderer;
   final Map<String, RTCVideoRenderer> _remoteRenderers = {};
   final Map<String, RTCPeerConnection> _peerConnections = {};
   final Map<String, String> _peerStates = {};
   final Map<String, List<RTCIceCandidate>> _pendingIce = {};
   final Set<String> _remoteDescriptionReady = <String>{};
+  final Map<String, String> _peerMeshMediaSignatures = <String, String>{};
+  final Map<String, Timer> _peerReconnectTimers = <String, Timer>{};
+  final Map<String, int> _peerReconnectAttempts = <String, int>{};
+  int _rtcSyncedSpeakerVersion = 0;
   bool _syncingRtc = false;
   bool _syncRtcPending = false;
   Timer? _rtcSyncDebounceTimer;
@@ -160,6 +167,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   int _broadcastRequestToken = 0;
   bool _localMicEnabled = true;
   bool _localVideoEnabled = false;
+  bool _liveSpeakerOn = true;
   bool _didInitializeStageMic = false;
   bool _wasOnStage = false;
   bool _isFollowingHost = false;
@@ -167,6 +175,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   int _heartCount = 0;
   int _audioRoomPageIndex = 0;
   int _videoRoomPageIndex = 0;
+  bool _videoRoomChromeVisible = true;
   bool _guestPreviewJoinInFlight = false;
   bool _guestPreviewExpired = false;
   DateTime? _guestPreviewEndsAt;
@@ -1244,6 +1253,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
       _queueRtcSync();
       unawaited(_refreshHostFollowState(broadcast));
+      if (_roomUsesVideo) {
+        unawaited(_pruneOffStageVideoRenderers());
+      }
     }
   }
 
@@ -1557,11 +1569,24 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     });
     if (accepted) {
       if (_usesSfuAudioPath) {
-        final joined = await _completeApprovedStageJoin();
-        if (!joined || !mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("You're now a speaker. Mic is off.")),
-        );
+        if (_roomUsesVideo) {
+          setState(() {
+            _optimisticallyPromoteSelfToStage();
+            _localMicEnabled = true;
+            _localVideoEnabled = true;
+          });
+          await _refreshLiveAudioPublishState();
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('You are now on stage.')),
+          );
+        } else {
+          final joined = await _completeApprovedStageJoin();
+          if (!joined || !mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("You're now a speaker. Mic is off.")),
+          );
+        }
       } else {
         ScaffoldMessenger.of(
           context,
@@ -1619,6 +1644,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _syncRoomChromeState();
     await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
     await _refreshLiveAudioPublishState();
+    await _ensureLiveSpeakerOutput();
     return true;
   }
 
@@ -1634,7 +1660,16 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     // Keep a single SFU session per room to avoid reconnect churn during
     // listener<->speaker transitions. Role changes should only toggle publish.
     if (_liveAudioService.isConnectedToRoom(roomId)) {
-      _recordRtcTransition('sfu_media_session ignored (already connected)');
+      _recordRtcTransition('sfu_media_session refresh while connected');
+      final canPublish = sessionRaw['canPublish'] == true;
+      await _liveAudioService.refreshStagePublish(
+        shouldPublish: canPublish && _amOnStage,
+        micEnabled: _localMicEnabled,
+        cameraEnabled: _localVideoEnabled,
+      );
+      if (_roomUsesVideo && canPublish) {
+        _localVideoEnabled = _liveAudioService.isLocalCameraEnabled;
+      }
       await _refreshLiveAudioPublishState();
       return;
     }
@@ -1654,7 +1689,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         decision == 'approved';
   }
 
-  bool get _usesSfuAudioPath => !_roomUsesVideo && AppConfig.liveUseSfuAudio;
+  bool get _usesSfuAudioPath => AppConfig.liveUseSfuAudio;
 
   Future<void> _connectLiveAudioSfu({
     required Map<String, dynamic> room,
@@ -1701,18 +1736,34 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       final token = '${session['token'] ?? ''}'.trim();
       if (url.isEmpty || token.isEmpty) return;
       final canPublish = session['canPublish'] == true;
+      final publishVideo =
+          _roomUsesVideo &&
+          (session['publishVideo'] == true || canPublish);
       developer.log(
-        '[LIVE][SFU] connect attempt room="${room['id']}" canPublish=$canPublish url="$url" tokenLen=${token.length}',
+        '[LIVE][SFU] connect attempt room="${room['id']}" '
+        'canPublish=$canPublish publishVideo=$publishVideo '
+        'url="$url" tokenLen=${token.length}',
         name: 'live_screen',
       );
       try {
+        _liveAudioService.onParticipantsChanged = () {
+          if (mounted) setState(() {});
+        };
         await _liveAudioService.connect(
           url: url,
           token: token,
           roomName: roomId,
           canPublish: canPublish,
+          publishVideo: publishVideo,
         );
-        _recordRtcTransition('sfu_connect ok publish=$canPublish');
+        if (_roomUsesVideo) {
+          _localVideoEnabled = publishVideo
+              ? _liveAudioService.isLocalCameraEnabled
+              : false;
+        }
+        _recordRtcTransition(
+          'sfu_connect ok publish=$canPublish video=$publishVideo',
+        );
       } catch (error, stackTrace) {
         developer.log(
           '[LIVE][SFU] connect failed: $error',
@@ -1735,6 +1786,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           }
         });
       }
+      await _ensureLiveSpeakerOutput();
     }();
     _sfuConnectInFlight = connectFuture;
     try {
@@ -1750,9 +1802,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (!_usesSfuAudioPath) return;
     final shouldPublish = _amOnStage;
     final micEnabled = shouldPublish && _localMicEnabled;
-    _recordRtcTransition('sfu_publish set=$micEnabled');
+    final cameraEnabled = shouldPublish && _localVideoEnabled;
+    _recordRtcTransition(
+      'sfu_publish mic=$micEnabled video=$cameraEnabled stage=$shouldPublish',
+    );
     try {
-      await _liveAudioService.setPublishing(micEnabled);
+      await _liveAudioService.refreshStagePublish(
+        shouldPublish: shouldPublish,
+        micEnabled: micEnabled,
+        cameraEnabled: cameraEnabled,
+      );
+      if (_roomUsesVideo) {
+        _localVideoEnabled = _liveAudioService.isLocalCameraEnabled;
+      }
     } catch (error, stackTrace) {
       developer.log(
         '[LIVE][SFU] publish toggle failed: $error',
@@ -1768,6 +1830,30 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _localMicEnabled = false;
       }
     });
+    await _ensureLiveSpeakerOutput();
+  }
+
+  /// Routes live playback to the loudspeaker when enabled. WebRTC and LiveKit
+  /// both reconfigure AVAudioSession during capture/connect, so this must run
+  /// after media starts — not only at room join.
+  Future<void> _ensureLiveSpeakerOutput() async {
+    if (_activeRoom == null || !mounted) return;
+    if (!_liveSpeakerOn) {
+      try {
+        await Helper.setSpeakerphoneOn(false);
+      } catch (_) {}
+      return;
+    }
+    try {
+      await Helper.setSpeakerphoneOn(true);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleLiveSpeaker() async {
+    if (_activeRoom == null) return;
+    _liveSpeakerOn = !_liveSpeakerOn;
+    await _ensureLiveSpeakerOutput();
+    if (mounted) setState(() {});
   }
 
   Future<bool> _createBroadcast(
@@ -1870,16 +1956,15 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       });
       _syncRoomChromeState();
       unawaited(_refreshHostFollowState(broadcast));
-      if ('${broadcast['type'] ?? 'audio'}' == 'audio') {
-        unawaited(Helper.setSpeakerphoneOn(true));
-      }
+      _liveSpeakerOn = true;
       _showSavedJoinNoticeIfNeeded(broadcast);
       if (_usesSfuAudioPath) {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
         await _refreshLiveAudioPublishState();
-      } else {
+      } else if (!_roomUsesVideo) {
         await _syncRtcParticipants();
       }
+      await _ensureLiveSpeakerOutput();
       return true;
     }
     if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
@@ -1956,20 +2041,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _syncRoomChromeState();
       _syncBrowseListRefreshTimer();
       unawaited(_refreshHostFollowState(broadcast));
-      if ('${broadcast['type'] ?? 'audio'}' == 'audio') {
-        unawaited(Helper.setSpeakerphoneOn(true));
-      }
+      _liveSpeakerOn = true;
       if (_usesSfuAudioPath) {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
         await _refreshLiveAudioPublishState();
       } else {
-        // Mesh: merge list snapshot so host/speaker ids exist before first RTC sync.
+        // Mesh audio fallback: merge list snapshot so host/speaker ids exist.
         if (_enrichActiveRoomFromBroadcasts()) {
           _refreshTopologyReady(_activeRoom);
         }
         await _syncRtcParticipants();
         unawaited(_refreshRoomTopologyAfterJoin());
       }
+      await _ensureLiveSpeakerOutput();
       return;
     }
     if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
@@ -2164,6 +2248,41 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     await _syncRtcParticipants();
   }
 
+  Future<void> _confirmLeaveBroadcast() async {
+    if (!mounted || _activeRoom == null) return;
+    final isHost = _isHost;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(isHost ? 'End broadcast?' : 'Leave room?'),
+          content: Text(
+            isHost
+                ? 'Everyone will be disconnected. This cannot be undone.'
+                : 'You can join again from the live list.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: _liveExitRed,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(isHost ? 'End broadcast' : 'Leave'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed == true && mounted) {
+      await _leaveBroadcast();
+    }
+  }
+
   Future<void> _leaveBroadcast() async {
     final room = _activeRoom;
     if (room == null) return;
@@ -2183,6 +2302,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (!mounted) return;
     setState(() {
       _activeRoom = null;
+      _videoRoomChromeVisible = true;
       _lastShownNoticeId = null;
       _activeRoomVersion = 0;
       _activeSpeakerVersion = 0;
@@ -3089,6 +3209,20 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return byUserId.values.take(4).toList(growable: false);
   }
 
+  Set<String> get _videoOnStageUserIds {
+    return _videoLiveParticipants
+        .map((p) => '${p['userId'] ?? p['id'] ?? ''}'.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
+  }
+
+  bool _shouldReceiveVideoFrom(String peerUserId) {
+    if (!_roomUsesVideo || peerUserId.isEmpty || peerUserId == _meId) {
+      return false;
+    }
+    return _videoOnStageUserIds.contains(peerUserId);
+  }
+
   bool get _amOnStage =>
       _isHost ||
       _speakers.any((speaker) => '${speaker['userId'] ?? ''}' == _meId);
@@ -3448,6 +3582,17 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         if (!occupied || userId.isEmpty || userId == _meId) continue;
         ids.add(userId);
       }
+      // Mesh host must keep links to the audience so listeners can receive
+      // outbound media (listeners always offer; host answers).
+      if (!_usesSfuAudioPath && _isHost) {
+        for (final member
+            in (room['audienceMembers'] as List<dynamic>? ?? const [])) {
+          if (member is! Map) continue;
+          final userId = '${member['userId'] ?? member['id'] ?? ''}'.trim();
+          if (userId.isEmpty || userId == _meId) continue;
+          ids.add(userId);
+        }
+      }
     }
     final hostUserId = _resolveHostUserId(room);
     if (hostUserId.isNotEmpty && hostUserId != _meId) {
@@ -3456,8 +3601,66 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return ids.toList();
   }
 
+  String _meshPeerMediaSignature(
+    String peerUserId, {
+    required bool shouldSendAudio,
+  }) {
+    if (!_roomUsesVideo) {
+      return 'a:${shouldSendAudio ? 1 : 0}';
+    }
+    final shouldSendVideo = _amOnStage && _localVideoEnabled;
+    final shouldReceiveVideo = _shouldReceiveVideoFrom(peerUserId);
+    return 'a:${shouldSendAudio ? 1 : 0},vs:${shouldSendVideo ? 1 : 0},vr:${shouldReceiveVideo ? 1 : 0}';
+  }
+
+  TransceiverDirection _videoTransceiverDirection({
+    required bool shouldSendVideo,
+    required bool shouldReceiveVideo,
+  }) {
+    if (shouldSendVideo && shouldReceiveVideo) {
+      return TransceiverDirection.SendRecv;
+    }
+    if (shouldSendVideo) return TransceiverDirection.SendOnly;
+    if (shouldReceiveVideo) return TransceiverDirection.RecvOnly;
+    return TransceiverDirection.Inactive;
+  }
+
+  Future<void> _pruneOffStageVideoRenderers() async {
+    if (!_roomUsesVideo) return;
+    final onStage = _videoOnStageUserIds;
+    var changed = false;
+    for (final userId in _remoteRenderers.keys.toList()) {
+      if (onStage.contains(userId)) continue;
+      final renderer = _remoteRenderers.remove(userId);
+      try {
+        renderer?.srcObject = null;
+        await renderer?.dispose();
+      } catch (_) {}
+      changed = true;
+    }
+    if (changed && mounted) setState(() {});
+  }
+
+  void _bindRemoteTrackLifecycle(String peerUserId, MediaStreamTrack track) {
+    track.onEnded = () {
+      if (!mounted) return;
+      if (track.kind == 'video') {
+        final renderer = _remoteRenderers[peerUserId];
+        if (renderer != null) {
+          renderer.srcObject = null;
+          setState(() {});
+        }
+      }
+    };
+  }
+
   Future<void> _ensureLocalStageStream() async {
     if (!_amOnStage) return;
+    if (_usesSfuAudioPath && _roomUsesVideo) {
+      await _refreshLiveAudioPublishState();
+      if (mounted) setState(() {});
+      return;
+    }
     if (_roomUsesVideo) {
       await _ensureLocalRendererReady();
     }
@@ -3487,6 +3690,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Future<void> _disposeLocalStageStream() async {
+    if (_usesSfuAudioPath && _roomUsesVideo) {
+      await _refreshLiveAudioPublishState();
+      return;
+    }
     _localRenderer?.srcObject = null;
     _localMicEnabled = true;
     _localVideoEnabled = false;
@@ -3502,8 +3709,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   Future<void> _ensureVideoBroadcastMeshPeerMedia(
     RTCPeerConnection connection, {
     required bool shouldSendAudio,
+    required bool shouldReceiveVideo,
   }) async {
     final shouldSendVideo = _amOnStage && _localVideoEnabled;
+    final videoDirection = _videoTransceiverDirection(
+      shouldSendVideo: shouldSendVideo,
+      shouldReceiveVideo: shouldReceiveVideo,
+    );
     final transceivers = await connection.getTransceivers();
 
     RTCRtpTransceiver? audioTransceiver;
@@ -3560,18 +3772,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (videoTransceiver == null) {
       videoTransceiver = await connection.addTransceiver(
         kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: RTCRtpTransceiverInit(
-          direction: shouldSendVideo
-              ? TransceiverDirection.SendRecv
-              : TransceiverDirection.RecvOnly,
-        ),
+        init: RTCRtpTransceiverInit(direction: videoDirection),
       );
     } else {
-      await videoTransceiver.setDirection(
-        shouldSendVideo
-            ? TransceiverDirection.SendRecv
-            : TransceiverDirection.RecvOnly,
-      );
+      await videoTransceiver.setDirection(videoDirection);
     }
 
     final videoSender = videoTransceiver.sender;
@@ -3591,12 +3795,14 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
 
   Future<void> _ensureAudioPeerMode(
     RTCPeerConnection connection, {
+    required String peerUserId,
     required bool shouldSendAudio,
   }) async {
     if (_roomUsesVideo) {
       await _ensureVideoBroadcastMeshPeerMedia(
         connection,
         shouldSendAudio: shouldSendAudio,
+        shouldReceiveVideo: _shouldReceiveVideoFrom(peerUserId),
       );
       return;
     }
@@ -3654,6 +3860,38 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return renderer;
   }
 
+  void _clearPeerReconnect(String peerUserId) {
+    _peerReconnectTimers.remove(peerUserId)?.cancel();
+    _peerReconnectAttempts.remove(peerUserId);
+  }
+
+  void _schedulePeerReconnect(String peerUserId) {
+    if (!_roomUsesVideo || _activeRoom == null || peerUserId.isEmpty) return;
+    if (!_rtcTargetPeerIds.contains(peerUserId)) return;
+    if (_peerReconnectTimers.containsKey(peerUserId)) return;
+    final attempts = (_peerReconnectAttempts[peerUserId] ?? 0) + 1;
+    _peerReconnectAttempts[peerUserId] = attempts;
+    final delaySeconds = math.min(8, math.max(1, attempts * 2));
+    _peerReconnectTimers[peerUserId] = Timer(
+      Duration(seconds: delaySeconds),
+      () {
+        _peerReconnectTimers.remove(peerUserId);
+        if (!mounted || _activeRoom == null || !_roomUsesVideo) return;
+        if (!_rtcTargetPeerIds.contains(peerUserId)) {
+          _peerReconnectAttempts.remove(peerUserId);
+          _peerStates.remove(peerUserId);
+          if (mounted) setState(() {});
+          return;
+        }
+        _recordRtcTransition(
+          'rtc_peer_reconnect peer=$peerUserId attempt=$attempts',
+        );
+        _queueRtcSync(immediate: true);
+      },
+    );
+    if (mounted) setState(() {});
+  }
+
   Future<RTCPeerConnection> _ensurePeerConnection(String peerUserId) async {
     final existing = _peerConnections[peerUserId];
     if (existing != null) return existing;
@@ -3675,31 +3913,46 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     connection.onTrack = (event) async {
       if (!mounted) return;
       if (!_peerConnections.containsKey(peerUserId)) return;
-      final renderer = await _ensureRemoteRenderer(peerUserId);
-      if (event.streams.isNotEmpty) {
-        renderer.srcObject = event.streams.first;
-      } else {
-        final fallbackStream = await createLocalMediaStream(
-          'remote-$peerUserId-${DateTime.now().millisecondsSinceEpoch}',
-        );
-        await fallbackStream.addTrack(event.track);
-        renderer.srcObject = fallbackStream;
+      _bindRemoteTrackLifecycle(peerUserId, event.track);
+      if (event.track.kind == 'video') {
+        if (!_shouldReceiveVideoFrom(peerUserId)) {
+          if (mounted) setState(() {});
+          return;
+        }
+        final renderer = await _ensureRemoteRenderer(peerUserId);
+        if (event.streams.isNotEmpty) {
+          renderer.srcObject = event.streams.first;
+        } else {
+          final fallbackStream = await createLocalMediaStream(
+            'remote-$peerUserId-${DateTime.now().millisecondsSinceEpoch}',
+          );
+          await fallbackStream.addTrack(event.track);
+          renderer.srcObject = fallbackStream;
+        }
+        if (mounted) setState(() {});
+        unawaited(_syncHostHeroVideo());
+        return;
       }
       if (event.track.kind == 'audio') {
         _markInboundAudioDetected();
+        await _ensureLiveSpeakerOutput();
       }
       if (mounted) setState(() {});
-      if (_roomUsesVideo) {
-        unawaited(_syncHostHeroVideo());
-      }
     };
 
     connection.onConnectionState = (state) {
       if (!mounted) return;
       _peerStates[peerUserId] = _describeConnectionState(state);
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _clearPeerReconnect(peerUserId);
+      }
       setState(() {});
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _schedulePeerReconnect(peerUserId);
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _schedulePeerReconnect(peerUserId);
+        unawaited(_removePeer(peerUserId, keepReconnectTimer: true));
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         unawaited(_removePeer(peerUserId));
       }
     };
@@ -3712,10 +3965,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     final room = _activeRoom;
     if (room == null) return;
     final connection = await _ensurePeerConnection(peerUserId);
-    await _ensureAudioPeerMode(connection, shouldSendAudio: _amOnStage);
+    final shouldSendAudio = _amOnStage;
+    await _ensureAudioPeerMode(
+      connection,
+      peerUserId: peerUserId,
+      shouldSendAudio: shouldSendAudio,
+    );
+    _peerMeshMediaSignatures[peerUserId] = _meshPeerMediaSignature(
+      peerUserId,
+      shouldSendAudio: shouldSendAudio,
+    );
     final offer = await connection.createOffer(<String, dynamic>{
       'offerToReceiveAudio': true,
-      'offerToReceiveVideo': _roomUsesVideo,
+      'offerToReceiveVideo': _shouldReceiveVideoFrom(peerUserId),
     });
     await connection.setLocalDescription(offer);
     _socket.emit('live:rtc:offer', <String, dynamic>{
@@ -3803,8 +4065,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _wasOnStage = onStageNow;
       if (mounted) setState(() {});
       if (_roomUsesVideo) {
+        await _pruneOffStageVideoRenderers();
         unawaited(_syncHostHeroVideo());
       }
+      await _ensureLiveSpeakerOutput();
       return;
     }
     final existingIds = _peerConnections.keys.toList();
@@ -3814,17 +4078,41 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
     }
 
+    final speakerVersion = _activeSpeakerVersion;
+    final speakersChanged = speakerVersion != _rtcSyncedSpeakerVersion;
+
     for (final peerUserId in peerIds) {
       if (!mounted || _activeRoom == null) return;
       final hadConnection = _peerConnections.containsKey(peerUserId);
       final connection = await _ensurePeerConnection(peerUserId);
-      await _ensureAudioPeerMode(connection, shouldSendAudio: _amOnStage);
+      final shouldSendAudio = _amOnStage;
+      await _ensureAudioPeerMode(
+        connection,
+        peerUserId: peerUserId,
+        shouldSendAudio: shouldSendAudio,
+      );
+      final signature = _meshPeerMediaSignature(
+        peerUserId,
+        shouldSendAudio: shouldSendAudio,
+      );
+      final priorSignature = _peerMeshMediaSignatures[peerUserId];
+      _peerMeshMediaSignatures[peerUserId] = signature;
       final shouldOffer = !_amOnStage || _meId.compareTo(peerUserId) < 0;
       if (!shouldOffer) continue;
-      if (!hadConnection || !_remoteDescriptionReady.contains(peerUserId)) {
+      final negotiated =
+          hadConnection && _remoteDescriptionReady.contains(peerUserId);
+      final mediaChanged =
+          negotiated && priorSignature != null && priorSignature != signature;
+      final needsOffer =
+          !negotiated ||
+          mediaChanged ||
+          transitionedToStage ||
+          (speakersChanged && negotiated);
+      if (needsOffer) {
         await _sendOffer(peerUserId);
       }
     }
+    _rtcSyncedSpeakerVersion = speakerVersion;
 
     _syncSpeakingProbeLifecycle();
     if (_shouldMonitorListenerAudio) {
@@ -3833,10 +4121,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _stopAudioRecoveryMonitor();
     }
     _wasOnStage = onStageNow;
-    if (mounted) setState(() {});
     if (_roomUsesVideo) {
+      await _pruneOffStageVideoRenderers();
       unawaited(_syncHostHeroVideo());
     }
+    await _ensureLiveSpeakerOutput();
+    if (mounted) setState(() {});
   }
 
   Future<void> _bootstrapMicOnStageJoin() async {
@@ -3860,10 +4150,22 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     }
   }
 
-  Future<void> _removePeer(String peerUserId) async {
+  Future<void> _removePeer(
+    String peerUserId, {
+    bool keepReconnectTimer = false,
+  }) async {
+    if (!keepReconnectTimer) {
+      _peerReconnectTimers.remove(peerUserId)?.cancel();
+      _peerReconnectAttempts.remove(peerUserId);
+    }
     _remoteDescriptionReady.remove(peerUserId);
+    _peerMeshMediaSignatures.remove(peerUserId);
     _pendingIce.remove(peerUserId);
-    _peerStates.remove(peerUserId);
+    if (keepReconnectTimer) {
+      _peerStates[peerUserId] = 'reconnecting';
+    } else {
+      _peerStates.remove(peerUserId);
+    }
     final connection = _peerConnections.remove(peerUserId);
     final renderer = _remoteRenderers.remove(peerUserId);
     try {
@@ -3877,11 +4179,18 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Future<void> _disposeRtc() async {
+    for (final timer in _peerReconnectTimers.values) {
+      timer.cancel();
+    }
+    _peerReconnectTimers.clear();
+    _peerReconnectAttempts.clear();
     await _disposeHostHeroRenderer();
     final peerIds = _peerConnections.keys.toList();
     for (final peerUserId in peerIds) {
       await _removePeer(peerUserId);
     }
+    _peerMeshMediaSignatures.clear();
+    _rtcSyncedSpeakerVersion = 0;
     await _disposeLocalStageStream();
     _stopAudioRecoveryMonitor();
     for (final timer in _speakingDecayTimers.values) {
@@ -3894,7 +4203,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
 
   bool get _shouldMonitorListenerAudio {
     return _activeRoom != null &&
-        !_roomUsesVideo &&
+        !_usesSfuAudioPath &&
         !_amOnStage &&
         _socketStatus == 'connected';
   }
@@ -4022,6 +4331,13 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Future<void> _toggleStageCamera() async {
+    if (_usesSfuAudioPath && _roomUsesVideo) {
+      final next = !_localVideoEnabled;
+      await _liveAudioService.setCameraEnabled(next);
+      _localVideoEnabled = _liveAudioService.isLocalCameraEnabled;
+      if (mounted) setState(() {});
+      return;
+    }
     final stream = ref.read(webRtcServiceProvider).localStream;
     if (stream == null || stream.getVideoTracks().isEmpty) return;
     for (final track in stream.getVideoTracks()) {
@@ -4031,10 +4347,18 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (mounted) setState(() {});
     if (_roomUsesVideo) {
       unawaited(_syncHostHeroVideo());
+      if (_amOnStage) {
+        _queueRtcSync(immediate: true);
+      }
     }
   }
 
   Future<void> _switchStageCamera() async {
+    if (_usesSfuAudioPath && _roomUsesVideo) {
+      final switched = await _liveAudioService.switchCamera();
+      if (switched && mounted) setState(() {});
+      return;
+    }
     final switched = await ref.read(webRtcServiceProvider).switchCamera();
     if (switched && mounted) {
       setState(() {});
@@ -4131,6 +4455,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     });
     _syncRoomChromeState();
     _queueRtcSync(immediate: true);
+    if (_roomUsesVideo) {
+      unawaited(_pruneOffStageVideoRenderers());
+    }
+    unawaited(_ensureLiveSpeakerOutput());
   }
 
   Future<void> _onRtcOffer(dynamic data) async {
@@ -4144,16 +4472,25 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       await _ensureLocalStageStream();
     }
     final connection = await _ensurePeerConnection(fromUserId);
-    await _ensureAudioPeerMode(connection, shouldSendAudio: _amOnStage);
     final sdp = Map<String, dynamic>.from(payload['sdp'] as Map);
     await connection.setRemoteDescription(
       RTCSessionDescription(sdp['sdp']?.toString(), sdp['type']?.toString()),
     );
     _remoteDescriptionReady.add(fromUserId);
     await _flushPendingIce(fromUserId);
+    final shouldSendAudio = _amOnStage;
+    await _ensureAudioPeerMode(
+      connection,
+      peerUserId: fromUserId,
+      shouldSendAudio: shouldSendAudio,
+    );
+    _peerMeshMediaSignatures[fromUserId] = _meshPeerMediaSignature(
+      fromUserId,
+      shouldSendAudio: shouldSendAudio,
+    );
     final answer = await connection.createAnswer(<String, dynamic>{
       'offerToReceiveAudio': true,
-      'offerToReceiveVideo': _roomUsesVideo,
+      'offerToReceiveVideo': _shouldReceiveVideoFrom(fromUserId),
     });
     await connection.setLocalDescription(answer);
     _socket.emit('live:rtc:answer', <String, dynamic>{
@@ -4177,6 +4514,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _remoteDescriptionReady.add(fromUserId);
     _peerStates[fromUserId] = 'connected';
     await _flushPendingIce(fromUserId);
+    await _ensureLiveSpeakerOutput();
   }
 
   Future<void> _onRtcIce(dynamic data) async {
@@ -5785,6 +6123,131 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     return _buildImmersiveVideoRoom(theme, socketStatus);
   }
 
+  List<String> get _videoRtcProblemStates {
+    if (!_roomUsesVideo) return const <String>[];
+    return _peerStates.values
+        .map((state) => state.trim().toLowerCase())
+        .where(
+          (state) =>
+              state == 'connecting' ||
+              state == 'disconnected' ||
+              state == 'failed' ||
+              state == 'reconnecting',
+        )
+        .toList(growable: false);
+  }
+
+  bool get _videoRtcNeedsAttention {
+    if (!_roomUsesVideo) return false;
+    if (_videoRtcProblemStates.isNotEmpty) return true;
+    return _rtcTargetPeerIds.isNotEmpty && _peerConnections.isEmpty;
+  }
+
+  Widget _buildVideoRtcStatusBanner(ThemeData theme) {
+    final problemCount = _videoRtcProblemStates.length;
+    final reconnecting = _peerReconnectTimers.isNotEmpty;
+    final message = reconnecting || problemCount > 0
+        ? 'Reconnecting live video...'
+        : 'Connecting live video...';
+    final detail = problemCount > 1
+        ? '$problemCount video links need attention'
+        : reconnecting
+        ? 'Trying to restore the media link'
+        : 'Waiting for media negotiation';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.58),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                Colors.white.withValues(alpha: 0.9),
+              ),
+            ),
+          ),
+          const SizedBox(width: 9),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  message,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                Text(
+                  detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.78),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVideoPeerStatusChip(ThemeData theme, String userId) {
+    final state = _peerStates[userId]?.trim().toLowerCase() ?? '';
+    if (userId == _meId || state.isEmpty || state == 'connected') {
+      return const SizedBox.shrink();
+    }
+    final label = switch (state) {
+      'reconnecting' || 'disconnected' || 'failed' => 'Reconnecting',
+      'connecting' => 'Connecting',
+      _ => state,
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.54),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: const BoxDecoration(
+              color: Colors.amber,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildImmersiveVideoRoom(ThemeData theme, String socketStatus) {
     final room = _activeRoom!;
     final mq = MediaQuery.of(context);
@@ -5797,6 +6260,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         Theme.of(context).platform == TargetPlatform.iOS ? safeAreaBottom : 0.0;
     final composerTop = 56 + composerBottomPadding + iPhoneCommentClearance;
     final pageTop = topInset + (socketStatus == 'connected' ? 118.0 : 160.0);
+    final chromePinned = isCommenting || socketStatus != 'connected';
+    final showChrome = chromePinned || _videoRoomChromeVisible;
 
     return MediaQuery.removePadding(
       context: context,
@@ -5805,86 +6270,130 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         fit: StackFit.expand,
         children: [
           Positioned.fill(child: _buildLiveVideoGrid(theme)),
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 0,
-            height: 220,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.72),
-                    Colors.black.withValues(alpha: 0.08),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          PageView(
-            key: const PageStorageKey<String>('video-room-pages'),
-            controller: _videoRoomPageController,
-            onPageChanged: (index) =>
-                setState(() => _videoRoomPageIndex = index),
-            children: [
-              const SizedBox.expand(),
-              _buildVideoCommentsScreen(
-                theme,
-                top: pageTop,
-                bottom: composerTop,
-                isCommenting: isCommenting,
-              ),
-            ],
-          ),
-          Positioned(
-            right: 0,
-            bottom: 100,
-            width: 120,
-            height: 400,
-            child: FlyingReactions(stream: _reactionController.stream),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            top: topInset + 6,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildImmersiveAudioHeader(theme, room),
-                const SizedBox(height: 8),
-                _buildVideoPageIndicator(theme),
-                if (socketStatus != 'connected') ...[
-                  const SizedBox(height: 8),
-                  RealtimeWarningBanner(
-                    status: socketStatus,
-                    scopeLabel: 'Live room',
-                    connectingMessage: 'Reconnecting to the broadcast...',
+          IgnorePointer(
+            ignoring: !showChrome,
+            child: AnimatedOpacity(
+              opacity: showChrome ? 1 : 0,
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    height: 220,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.black.withValues(alpha: 0.72),
+                            Colors.black.withValues(alpha: 0.08),
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  PageView(
+                    key: const PageStorageKey<String>('video-room-pages'),
+                    controller: _videoRoomPageController,
+                    onPageChanged: (index) => setState(() {
+                      _videoRoomPageIndex = index;
+                      if (index == 1) _videoRoomChromeVisible = true;
+                    }),
+                    children: [
+                      const SizedBox.expand(),
+                      _buildVideoCommentsScreen(
+                        theme,
+                        top: pageTop,
+                        bottom: composerTop,
+                        isCommenting: isCommenting,
+                      ),
+                    ],
+                  ),
+                  Positioned(
+                    right: 0,
+                    bottom: 100,
+                    width: 120,
+                    height: 400,
+                    child: FlyingReactions(stream: _reactionController.stream),
+                  ),
+                  Positioned(
+                    left: 16,
+                    right: 56,
+                    top: topInset + 6,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildImmersiveAudioHeader(theme, room),
+                        const SizedBox(height: 8),
+                        _buildVideoPageIndicator(theme),
+                        if (socketStatus != 'connected') ...[
+                          const SizedBox(height: 8),
+                          RealtimeWarningBanner(
+                            status: socketStatus,
+                            scopeLabel: 'Live room',
+                            connectingMessage:
+                                'Reconnecting to the broadcast...',
+                          ),
+                        ],
+                        if (socketStatus == 'connected' &&
+                            _videoRtcNeedsAttention) ...[
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: _buildVideoRtcStatusBanner(theme),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    bottom: 64 + composerBottomPadding + iPhoneCommentClearance,
+                    child: _buildVideoStageInviteDock(theme),
+                  ),
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom:
+                        120 + composerBottomPadding + iPhoneCommentClearance,
+                    child: _buildImmersiveTopActions(theme),
+                  ),
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: composerBottomPadding,
+                    child: _buildImmersiveComposer(
+                      theme,
+                      socketStatus,
+                      isCommenting,
+                    ),
                   ),
                 ],
-              ],
+              ),
             ),
           ),
           Positioned(
-            left: 12,
+            top: topInset + 8,
             right: 12,
-            bottom: 64 + composerBottomPadding + iPhoneCommentClearance,
-            child: _buildVideoStageInviteDock(theme),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 120 + composerBottomPadding + iPhoneCommentClearance,
-            child: _buildImmersiveTopActions(theme),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: composerBottomPadding,
-            child: _buildImmersiveComposer(theme, socketStatus, isCommenting),
+            child: _VideoRoomChromeToggle(
+              chromeVisible: showChrome,
+              pinned: chromePinned,
+              onPressed: () {
+                if (chromePinned) return;
+                HapticFeedback.selectionClick();
+                setState(
+                  () => _videoRoomChromeVisible = !_videoRoomChromeVisible,
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -6047,14 +6556,21 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }) {
     final userId = '${participant['userId'] ?? participant['id'] ?? ''}'.trim();
     final name = '${participant['name'] ?? 'Live user'}'.trim();
+    final showsOnStageVideo =
+        userId == _meId || _videoOnStageUserIds.contains(userId);
+    final sfuTrack = _usesSfuAudioPath && _roomUsesVideo && showsOnStageVideo
+        ? _liveAudioService.videoTrackForIdentity(userId)
+        : null;
     final renderer = userId == _meId
         ? _localRenderer
         : _remoteRenderers[userId];
     final stream = renderer?.srcObject;
-    final hasLiveVideo =
-        renderer != null &&
-        stream != null &&
-        stream.getVideoTracks().any((track) => track.enabled);
+    final hasLiveVideo = sfuTrack != null
+        ? true
+        : showsOnStageVideo &&
+              renderer != null &&
+              stream != null &&
+              stream.getVideoTracks().any((track) => track.enabled);
     final role = '${participant['role'] ?? ''}'.toLowerCase().contains('host')
         ? 'Host'
         : 'Live';
@@ -6067,11 +6583,20 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           ColoredBox(
             color: Colors.black,
             child: hasLiveVideo
-                ? RTCVideoView(
-                    renderer,
-                    mirror: userId == _meId,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                  )
+                ? sfuTrack != null
+                      ? VideoTrackRenderer(
+                          sfuTrack,
+                          fit: VideoViewFit.cover,
+                          mirrorMode: userId == _meId
+                              ? VideoViewMirrorMode.mirror
+                              : VideoViewMirrorMode.auto,
+                        )
+                      : RTCVideoView(
+                          renderer!,
+                          mirror: userId == _meId,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        )
                 : Center(
                     child: _AvatarBubble(
                       photoUrl: '${participant['photo'] ?? ''}',
@@ -6097,6 +6622,11 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                 ),
               ),
             ),
+          ),
+          Positioned(
+            left: 12,
+            top: 12,
+            child: _buildVideoPeerStatusChip(theme, userId),
           ),
           Positioned(
             left: 12,
@@ -6937,20 +7467,35 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           onTap: () => _sendReaction('❤️'),
         ),
       _SideRailButton(
-        icon: _isHost ? Icons.stop_circle_outlined : Icons.logout_rounded,
-        isDestructive: true,
-        onTap: _leaveBroadcast,
+        icon: _liveSpeakerOn ? Icons.volume_up_rounded : Icons.hearing_rounded,
+        isActive: _liveSpeakerOn,
+        onTap: () {
+          unawaited(_toggleLiveSpeaker());
+        },
       ),
     ];
-    return SizedBox(
-      height: 48,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        itemCount: actions.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (context, index) => actions[index],
-      ),
+    return Row(
+      children: [
+        Expanded(
+          child: SizedBox(
+            height: 48,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              itemCount: actions.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, index) => actions[index],
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        _LiveExitButton(
+          isHost: isHost,
+          onTap: () {
+            unawaited(_confirmLeaveBroadcast());
+          },
+        ),
+      ],
     );
   }
 
@@ -9335,6 +9880,112 @@ class _ImmersiveCommentBubble extends StatelessWidget {
   }
 }
 
+class _VideoRoomChromeToggle extends StatelessWidget {
+  const _VideoRoomChromeToggle({
+    required this.chromeVisible,
+    required this.pinned,
+    required this.onPressed,
+  });
+
+  final bool chromeVisible;
+  final bool pinned;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = chromeVisible
+        ? Icons.visibility_off_outlined
+        : Icons.visibility_outlined;
+    final tooltip = chromeVisible ? 'Hide controls' : 'Show controls';
+    return Tooltip(
+      message: pinned ? 'Controls stay visible while typing' : tooltip,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: pinned ? null : onPressed,
+          borderRadius: BorderRadius.circular(999),
+          child: Ink(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: pinned ? 0.22 : 0.38),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+            ),
+            child: Icon(
+              pinned ? Icons.push_pin_outlined : icon,
+              color: Colors.white.withValues(alpha: pinned ? 0.55 : 0.92),
+              size: 20,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveExitButton extends StatelessWidget {
+  const _LiveExitButton({required this.isHost, required this.onTap});
+
+  final bool isHost;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = isHost ? 'End' : 'Leave';
+    final icon = isHost ? Icons.stop_rounded : Icons.logout_rounded;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          HapticFeedback.mediumImpact();
+          onTap();
+        },
+        borderRadius: BorderRadius.circular(14),
+        child: Ink(
+          height: 48,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                _LiveScreenState._liveExitRedBright,
+                _LiveScreenState._liveExitRed,
+              ],
+            ),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+            boxShadow: [
+              BoxShadow(
+                color: _LiveScreenState._liveExitRed.withValues(alpha: 0.45),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Colors.white, size: 20),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SideRailButton extends StatelessWidget {
   const _SideRailButton({
     this.icon,
@@ -9342,7 +9993,6 @@ class _SideRailButton extends StatelessWidget {
     this.onTap,
     this.badgeLabel,
     this.isActive = false,
-    this.isDestructive = false,
   }) : assert(
          icon != null || iconWidget != null,
          '_SideRailButton requires icon or iconWidget',
@@ -9356,7 +10006,6 @@ class _SideRailButton extends StatelessWidget {
   final VoidCallback? onTap;
   final String? badgeLabel;
   final bool isActive;
-  final bool isDestructive;
 
   @override
   Widget build(BuildContext context) {
@@ -9385,18 +10034,12 @@ class _SideRailButton extends StatelessWidget {
                 width: 48,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: isDestructive
-                      ? theme.colorScheme.error.withValues(alpha: 0.78)
-                      : isActive
+                  color: isActive
                       ? _LiveScreenState._audioRoomAccent
                       : Colors.white12,
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: isDestructive
-                        ? theme.colorScheme.error.withValues(alpha: 0.42)
-                        : isActive
-                        ? Colors.white24
-                        : Colors.white10,
+                    color: isActive ? Colors.white24 : Colors.white10,
                   ),
                   boxShadow: isActive
                       ? [

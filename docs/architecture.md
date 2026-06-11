@@ -1,8 +1,8 @@
 # Talkflix Flutter architecture
 
-Last updated: 2026-06-10
+Last updated: 2026-06-11
 
-This document describes how the mobile/web Flutter client is organized. It does not document the Node.js API implementation (see backend repo or `docs/v1-release-handoff.md` for production paths).
+This document describes how the mobile/web Flutter client is organized. It does not document the Node.js API implementation; see [backend-contracts.md](backend-contracts.md) for Flutter-owned backend expectations and API repo ownership.
 
 ## Stack
 
@@ -14,7 +14,7 @@ This document describes how the mobile/web Flutter client is organized. It does 
 | HTTP | `ApiClient` → `https://api.talkflix.cc` by default |
 | Realtime | Socket.IO (`SocketService`) |
 | 1:1 calls | WebRTC P2P + optional CallKit (iOS) |
-| Live audio rooms | LiveKit SFU when `AppConfig.liveUseSfuAudio` is true |
+| Live rooms (audio + video) | LiveKit SFU when `AppConfig.liveUseSfuAudio` is true |
 | IAP | Native store purchases via `pro_purchase_repository` |
 
 Entry point: `lib/main.dart` → `lib/app/app.dart`.
@@ -54,7 +54,7 @@ Convention: `features/<name>/data/` for repositories and DTOs; `features/<name>/
 3. `app_router.dart` redirects unauthenticated users to `/login` (except public routes).
 4. On connect, `SocketService` uses the session token and validates user/session id.
 
-Public routes (no login required) include login/signup, legal pages, `/account-deletion`, shared content/live links, and the web coaching routes. See `publicLocations` and related checks in `app_router.dart`.
+Public routes (no login required) include login/signup, legal pages, `/support`, `/account-deletion`, shared content/live links, and the web coaching routes. See `publicLocations` and related checks in `app_router.dart`.
 
 ## Feature gates
 
@@ -90,7 +90,8 @@ Router and screens check these flags before exposing routes or UI.
 
 - `LiveScreen` — room list, host/listener/speaker roles
 - `LiveRoomSessionController` — stage state and permissions
-- Audio path uses LiveKit when SFU flag is on; host moderation uses ack-driven socket events
+- Audio and video broadcasts use LiveKit when SFU flag is on; mesh WebRTC remains a dev fallback when SFU is disabled
+- Host moderation uses ack-driven socket events
 
 ## Data and caching
 
@@ -115,4 +116,4 @@ Widget tests cover diagnostics/QA screens, `AppConfig`, and core auth parsing. T
 
 ## Related backend
 
-The API is Node.js + MySQL. Production runs on the droplet at `/opt/talkflix-api` behind `https://api.talkflix.cc`. Client assumes REST + Socket.IO on the same API host unless `API_BASE_URL` overrides it.
+The API is Node.js + MySQL. Production runs on the droplet at `/opt/talkflix-api` behind `https://api.talkflix.cc`. Client assumes REST + Socket.IO on the same API host unless `API_BASE_URL` overrides it. See [backend-contracts.md](backend-contracts.md) for contract ownership and change checklist.
