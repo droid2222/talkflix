@@ -416,10 +416,18 @@ class _FeatureCarousel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final width = MediaQuery.sizeOf(context).width;
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final compact = width < 390;
+    final cardHeight = math
+        .max(compact ? 220.0 : 204.0, 188.0 + ((textScale - 1.0) * 96.0))
+        .clamp(204.0, 286.0);
+    final cardPadding = compact ? 16.0 : 20.0;
+    final iconSize = compact ? 50.0 : 58.0;
     return Column(
       children: [
         SizedBox(
-          height: 178,
+          height: cardHeight,
           child: PageView.builder(
             controller: controller,
             itemCount: _proFeatures.length,
@@ -437,14 +445,14 @@ class _FeatureCarousel extends StatelessWidget {
                     ),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.all(20),
+                    padding: EdgeInsets.all(cardPadding),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Container(
-                          width: 58,
-                          height: 58,
+                          width: iconSize,
+                          height: iconSize,
                           decoration: const BoxDecoration(
                             shape: BoxShape.circle,
                             color: talkflixPrimary,
@@ -452,23 +460,33 @@ class _FeatureCarousel extends StatelessWidget {
                           child: Icon(
                             feature.icon,
                             color: Colors.white,
-                            size: 30,
+                            size: compact ? 26 : 30,
                           ),
                         ),
-                        const SizedBox(height: 14),
+                        SizedBox(height: compact ? 10 : 14),
                         Text(
                           feature.title,
-                          style: theme.textTheme.headlineSmall?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w900,
-                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              (compact
+                                      ? theme.textTheme.titleLarge
+                                      : theme.textTheme.headlineSmall)
+                                  ?.copyWith(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w900,
+                                  ),
                         ),
                         const SizedBox(height: 6),
-                        Text(
-                          feature.subtitle,
-                          style: theme.textTheme.bodyLarge?.copyWith(
-                            color: Colors.white.withValues(alpha: 0.78),
-                            height: 1.25,
+                        Flexible(
+                          child: Text(
+                            feature.subtitle,
+                            maxLines: compact ? 4 : 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              color: Colors.white.withValues(alpha: 0.78),
+                              height: 1.22,
+                            ),
                           ),
                         ),
                       ],
