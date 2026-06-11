@@ -115,11 +115,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                         _FeatureCopy(feature: feature),
                         const SizedBox(height: 24),
                         if (isProLike) ...[
-                          _StatusBanner(
-                            text: user!.plan == 'trial'
-                                ? 'Your Pro trial access is currently active.'
-                                : 'Talkflix Pro is active on this account.',
-                            color: const Color(0xFF34D399),
+                          const _StatusBanner(
+                            text: 'Talkflix Pro is active on this account.',
+                            color: Color(0xFF34D399),
                           ),
                           const SizedBox(height: 14),
                         ],
