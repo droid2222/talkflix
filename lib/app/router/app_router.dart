@@ -22,6 +22,7 @@ import '../../features/content/presentation/shared_content_link_screen.dart';
 import '../../features/content/presentation/user_post_composer_screen.dart';
 import '../../features/legal/presentation/account_deletion_screen.dart';
 import '../../features/legal/presentation/legal_policy_screen.dart';
+import '../../features/legal/presentation/support_screen.dart';
 import '../../features/live/presentation/live_screen.dart';
 import '../../features/meet/presentation/meet_anon_screen.dart';
 import '../../features/meet/presentation/meet_filters_screen.dart';
@@ -72,6 +73,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         '/signup',
         '/terms-of-service',
         '/privacy-policy',
+        AppConfig.supportPath,
         '/account-deletion',
         '/coaching',
         '/forgot-password',
@@ -156,6 +158,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/privacy-policy',
         builder: (context, state) =>
             const LegalPolicyScreen(type: LegalPolicyType.privacy),
+      ),
+      GoRoute(
+        path: AppConfig.supportPath,
+        builder: (context, state) => const SupportScreen(),
       ),
       GoRoute(
         path: AppConfig.accountDeletionPath,

@@ -7,6 +7,8 @@ class AppConfig {
 
   /// Public web / store landing page used in SMS invites and contact cards.
   static const publicMarketingUrl = 'https://www.talkflix.cc';
+  static const supportPath = '/support';
+  static const supportUrl = '$publicMarketingUrl$supportPath';
   static const accountDeletionPath = '/account-deletion';
   static const accountDeletionUrl = '$publicMarketingUrl$accountDeletionPath';
   static const supportEmail = 'info@talkflix.cc';
