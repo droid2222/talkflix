@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
@@ -18,6 +20,7 @@ class ProPurchaseState {
     this.loadingProducts = false,
     this.storeAvailable = false,
     this.products = const <ProductDetails>[],
+    this.webPlans = const <ProStripePlan>[],
     this.notFoundProductIds = const <String>[],
     this.processingPurchase = false,
     this.pendingStoreConfirmation = false,
@@ -30,6 +33,7 @@ class ProPurchaseState {
   final bool loadingProducts;
   final bool storeAvailable;
   final List<ProductDetails> products;
+  final List<ProStripePlan> webPlans;
   final List<String> notFoundProductIds;
   final bool processingPurchase;
   final bool pendingStoreConfirmation;
@@ -49,6 +53,7 @@ class ProPurchaseState {
     bool? loadingProducts,
     bool? storeAvailable,
     List<ProductDetails>? products,
+    List<ProStripePlan>? webPlans,
     List<String>? notFoundProductIds,
     bool? processingPurchase,
     bool? pendingStoreConfirmation,
@@ -63,6 +68,7 @@ class ProPurchaseState {
       loadingProducts: loadingProducts ?? this.loadingProducts,
       storeAvailable: storeAvailable ?? this.storeAvailable,
       products: products ?? this.products,
+      webPlans: webPlans ?? this.webPlans,
       notFoundProductIds: notFoundProductIds ?? this.notFoundProductIds,
       processingPurchase: processingPurchase ?? this.processingPurchase,
       pendingStoreConfirmation:
@@ -78,19 +84,21 @@ class ProPurchaseState {
 class ProPurchaseController extends StateNotifier<ProPurchaseState> {
   ProPurchaseController(this._ref) : super(const ProPurchaseState()) {
     if (AppConfig.paidUpgradeEnabled) {
-      _subscription = _repository.purchaseStream.listen(
-        _handlePurchaseUpdates,
-        onError: (Object error, StackTrace stackTrace) {
-          state = state.copyWith(
-            processingPurchase: false,
-            pendingStoreConfirmation: false,
-            buyingProductId: '',
-            restoring: false,
-            error: 'The store returned an unexpected purchase update.',
-            clearMessage: true,
-          );
-        },
-      );
+      if (!kIsWeb) {
+        _subscription = _repository.purchaseStream.listen(
+          _handlePurchaseUpdates,
+          onError: (Object error, StackTrace stackTrace) {
+            state = state.copyWith(
+              processingPurchase: false,
+              pendingStoreConfirmation: false,
+              buyingProductId: '',
+              restoring: false,
+              error: 'The store returned an unexpected purchase update.',
+              clearMessage: true,
+            );
+          },
+        );
+      }
       unawaited(loadProducts());
     }
   }
@@ -107,6 +115,7 @@ class ProPurchaseController extends StateNotifier<ProPurchaseState> {
       state = state.copyWith(
         storeAvailable: false,
         products: const <ProductDetails>[],
+        webPlans: const <ProStripePlan>[],
         notFoundProductIds: const <String>[],
         loadingProducts: false,
         error: 'Paid upgrades are disabled for this build.',
@@ -121,11 +130,23 @@ class ProPurchaseController extends StateNotifier<ProPurchaseState> {
       clearMessage: true,
     );
     try {
+      if (kIsWeb) {
+        final result = await _repository.queryStripePlans();
+        state = state.copyWith(
+          loadingProducts: false,
+          storeAvailable: result.checkoutAvailable,
+          products: const <ProductDetails>[],
+          webPlans: result.plans,
+        );
+        return;
+      }
+
       final result = await _repository.queryProducts();
       state = state.copyWith(
         loadingProducts: false,
         storeAvailable: result.storeAvailable,
         products: result.products,
+        webPlans: const <ProStripePlan>[],
         notFoundProductIds: result.notFoundIds,
         error: result.error,
       );
@@ -133,7 +154,67 @@ class ProPurchaseController extends StateNotifier<ProPurchaseState> {
       state = state.copyWith(
         loadingProducts: false,
         storeAvailable: false,
-        error: 'Could not load Pro plans from the store.',
+        error: kIsWeb
+            ? 'Could not load Pro plans for web checkout.'
+            : 'Could not load Pro plans from the store.',
+        clearMessage: true,
+      );
+    }
+  }
+
+  Future<void> startWebCheckout(String planId) async {
+    if (state.busy) return;
+    final session = _ref.read(sessionControllerProvider);
+    if (!session.isAuthenticated || session.user == null) {
+      state = state.copyWith(
+        error: 'Sign in before upgrading to Pro.',
+        clearMessage: true,
+      );
+      return;
+    }
+
+    state = state.copyWith(
+      buyingProductId: planId,
+      clearError: true,
+      clearMessage: true,
+    );
+    try {
+      final checkout = await _repository.createStripeCheckoutSession(
+        planId: planId,
+      );
+      final uri = Uri.tryParse(checkout.url);
+      if (uri == null || checkout.url.isEmpty) {
+        state = state.copyWith(
+          buyingProductId: '',
+          error: 'Stripe checkout did not return a valid payment link.',
+          clearMessage: true,
+        );
+        return;
+      }
+      final opened = await launchUrl(uri, webOnlyWindowName: '_self');
+      if (!opened) {
+        state = state.copyWith(
+          buyingProductId: '',
+          error: 'Could not open Stripe checkout.',
+          clearMessage: true,
+        );
+        return;
+      }
+      state = state.copyWith(
+        buyingProductId: '',
+        message: 'Continue in Stripe Checkout to finish upgrading.',
+        clearError: true,
+      );
+    } on ApiException catch (error) {
+      state = state.copyWith(
+        buyingProductId: '',
+        error: error.message,
+        clearMessage: true,
+      );
+    } catch (_) {
+      state = state.copyWith(
+        buyingProductId: '',
+        error: 'Could not start Stripe checkout.',
         clearMessage: true,
       );
     }

@@ -86,4 +86,6 @@ Flutter files:
 /Users/talkflix/talkflix_flutter/lib/features/content/presentation/content_screen.dart
 ```
 
-The upgrade screen now uses a full-screen paywall with Talkflix branding, feature icons, the triggering feature copy when available, and store-driven plan cards for monthly, six-month, and yearly subscriptions. The yearly plan is highlighted as the most popular plan, and all prices shown come from App Store / Google Play product data.
+The upgrade screen now uses a full-screen paywall with Talkflix branding, a swipeable benefit carousel, and monthly, six-month, and yearly plan cards. On iOS and Android, prices and purchase flow come from App Store / Google Play product data. On web, prices come from `GET /billing/pro/stripe-plans`, checkout starts with `POST /billing/pro/stripe-checkout-sessions`, and Stripe webhooks activate Pro after payment confirmation.
+
+Web Pro checkout uses the same Stripe configuration as web coaching commerce. Optional backend overrides are `STRIPE_PRO_MONTHLY_PRICE_ID`, `STRIPE_PRO_6_MONTHS_PRICE_ID`, `STRIPE_PRO_YEARLY_PRICE_ID`, `STRIPE_PRO_MONTHLY_AMOUNT_CENTS`, `STRIPE_PRO_6_MONTHS_AMOUNT_CENTS`, `STRIPE_PRO_YEARLY_AMOUNT_CENTS`, and `STRIPE_PRO_CURRENCY`. If Stripe Price IDs are not configured, the backend creates recurring Checkout price data from the configured amount cents.

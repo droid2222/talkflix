@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,6 +10,7 @@ import 'package:intl/intl.dart';
 import '../../../core/auth/session_controller.dart';
 import '../../../core/config/app_config.dart';
 import '../../../app/theme/app_theme.dart';
+import '../data/pro_purchase_repository.dart';
 import 'pro_purchase_controller.dart';
 
 class UpgradeScreen extends ConsumerStatefulWidget {
@@ -22,6 +24,33 @@ class UpgradeScreen extends ConsumerStatefulWidget {
 
 class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
   String _selectedProductId = '';
+  late final PageController _featurePageController;
+  late int _featurePageIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _featurePageIndex = _featureIndexFor(widget.featureName);
+    _featurePageController = PageController(
+      initialPage: _featurePageIndex,
+      viewportFraction: 0.88,
+    );
+    if (kIsWeb && Uri.base.queryParameters['checkout'] == 'success') {
+      Future<void>.microtask(() async {
+        try {
+          await ref.read(sessionControllerProvider.notifier).refreshProfile();
+        } catch (_) {
+          // Stripe webhooks can arrive shortly after the browser redirect.
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _featurePageController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -31,8 +60,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
     final purchaseController = ref.read(proPurchaseControllerProvider.notifier);
     final theme = Theme.of(context);
     final isProLike = user?.isProLike == true;
-    final feature = _featureFor(widget.featureName);
-    final plans = _planOptions(purchaseState.products);
+    final plans = kIsWeb
+        ? _stripePlanOptions(purchaseState.webPlans)
+        : _planOptions(purchaseState.products);
     final selectedPlan = _selectedPlan(plans);
     final selectedProduct = selectedPlan?.product;
     final topPadding = MediaQuery.paddingOf(context).top;
@@ -110,9 +140,15 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                           ),
                         ),
                         const SizedBox(height: 24),
-                        _FeatureRail(activeFeature: feature),
-                        const SizedBox(height: 18),
-                        _FeatureCopy(feature: feature),
+                        _FeatureCarousel(
+                          controller: _featurePageController,
+                          currentIndex: _featurePageIndex,
+                          onPageChanged: (index) {
+                            setState(() {
+                              _featurePageIndex = index;
+                            });
+                          },
+                        ),
                         const SizedBox(height: 24),
                         if (isProLike) ...[
                           const _StatusBanner(
@@ -142,7 +178,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                         ] else if (!purchaseState.storeAvailable) ...[
                           _StoreUnavailable(
                             text: AppConfig.paidUpgradeEnabled
-                                ? 'Pro plans are not available from the store on this device right now.'
+                                ? kIsWeb
+                                      ? 'Stripe checkout is not available right now.'
+                                      : 'Pro plans are not available from the store on this device right now.'
                                 : 'Paid upgrades are disabled for this build.',
                             onRetry: purchaseState.busy
                                 ? null
@@ -150,8 +188,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                           ),
                         ] else if (plans.isEmpty) ...[
                           _StoreUnavailable(
-                            text:
-                                'The store did not return the configured Pro plans yet. Confirm the product IDs in App Store Connect and Play Console.',
+                            text: kIsWeb
+                                ? 'The API did not return web Pro plans yet. Confirm the Stripe Pro plan configuration.'
+                                : 'The store did not return the configured Pro plans yet. Confirm the product IDs in App Store Connect and Play Console.',
                             onRetry: purchaseState.busy
                                 ? null
                                 : purchaseController.loadProducts,
@@ -160,16 +199,14 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                           for (final plan in plans) ...[
                             _PlanCard(
                               plan: plan,
-                              selected:
-                                  plan.product.id == selectedPlan?.product.id,
+                              selected: plan.id == selectedPlan?.id,
                               busy:
-                                  purchaseState.buyingProductId ==
-                                      plan.product.id ||
+                                  purchaseState.buyingProductId == plan.id ||
                                   purchaseState.processingPurchase,
                               disabled: purchaseState.busy || isProLike,
                               onTap: () {
                                 setState(() {
-                                  _selectedProductId = plan.product.id;
+                                  _selectedProductId = plan.id;
                                 });
                               },
                             ),
@@ -181,11 +218,18 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                           width: double.infinity,
                           child: FilledButton(
                             onPressed:
-                                selectedProduct == null ||
+                                selectedPlan == null ||
+                                    (!kIsWeb && selectedProduct == null) ||
                                     purchaseState.busy ||
                                     isProLike
                                 ? null
-                                : () => purchaseController.buy(selectedProduct),
+                                : () => kIsWeb
+                                      ? purchaseController.startWebCheckout(
+                                          selectedPlan.id,
+                                        )
+                                      : purchaseController.buy(
+                                          selectedProduct!,
+                                        ),
                             style: FilledButton.styleFrom(
                               backgroundColor: talkflixPrimary,
                               foregroundColor: Colors.white,
@@ -207,20 +251,24 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        TextButton(
-                          onPressed: purchaseState.busy
-                              ? null
-                              : purchaseController.restore,
-                          child: Text(
-                            purchaseState.restoring
-                                ? 'Restoring...'
-                                : 'Restore purchases',
-                            style: const TextStyle(color: Colors.white),
+                        if (!kIsWeb) ...[
+                          TextButton(
+                            onPressed: purchaseState.busy
+                                ? null
+                                : purchaseController.restore,
+                            child: Text(
+                              purchaseState.restoring
+                                  ? 'Restoring...'
+                                  : 'Restore purchases',
+                              style: const TextStyle(color: Colors.white),
+                            ),
                           ),
-                        ),
+                        ],
                         const SizedBox(height: 14),
                         Text(
-                          'Your store account will be charged at confirmation of purchase. Subscriptions renew automatically unless canceled in your App Store or Google Play account before the renewal period.',
+                          kIsWeb
+                              ? 'Checkout is handled securely by Stripe. Your Pro access is activated after Stripe confirms the subscription payment.'
+                              : 'Your store account will be charged at confirmation of purchase. Subscriptions renew automatically unless canceled in your App Store or Google Play account before the renewal period.',
                           textAlign: TextAlign.center,
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: Colors.white.withValues(alpha: 0.66),
@@ -239,13 +287,13 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
     );
   }
 
-  _ProFeature _featureFor(String rawFeature) {
+  int _featureIndexFor(String rawFeature) {
     final value = rawFeature.toLowerCase();
-    if (value.trim().isEmpty) return _proFeatures.first;
+    if (value.trim().isEmpty) return 0;
     if (_containsAny(value, const ['watch', 'video', 'podcast', 'content'])) {
-      return _proFeatures[1];
+      return 1;
     }
-    if (_containsAny(value, const ['call'])) return _proFeatures[2];
+    if (_containsAny(value, const ['call'])) return 2;
     if (_containsAny(value, const [
       'room',
       'broadcast',
@@ -255,10 +303,10 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
       'audience',
       'private',
     ])) {
-      return _proFeatures[3];
+      return 3;
     }
     if (_containsAny(value, const ['translate', 'paraphrase'])) {
-      return _proFeatures[4];
+      return 4;
     }
     if (_containsAny(value, const [
       'search',
@@ -267,9 +315,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
       'language',
       'filter',
     ])) {
-      return _proFeatures[5];
+      return 5;
     }
-    return _proFeatures.first;
+    return 0;
   }
 
   bool _containsAny(String value, List<String> needles) {
@@ -288,10 +336,33 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
     return sorted.map(_planOptionFor).toList(growable: false);
   }
 
+  List<_PlanOption> _stripePlanOptions(List<ProStripePlan> plans) {
+    final sorted = [...plans]
+      ..sort((a, b) {
+        final aIndex = AppConfig.proProductIds.indexOf(a.id);
+        final bIndex = AppConfig.proProductIds.indexOf(b.id);
+        final safeA = aIndex == -1 ? 999 : aIndex;
+        final safeB = bIndex == -1 ? 999 : bIndex;
+        return safeA.compareTo(safeB);
+      });
+    return sorted
+        .map(
+          (plan) => _PlanOption(
+            id: plan.id,
+            label: plan.label,
+            months: plan.months,
+            price: plan.price,
+            monthlyPrice: plan.monthlyPrice,
+            popular: plan.popular,
+          ),
+        )
+        .toList(growable: false);
+  }
+
   _PlanOption? _selectedPlan(List<_PlanOption> plans) {
     if (plans.isEmpty) return null;
     for (final plan in plans) {
-      if (plan.product.id == _selectedProductId) return plan;
+      if (plan.id == _selectedProductId) return plan;
     }
     final yearly = plans.where((plan) => plan.months == 12).firstOrNull;
     return yearly ?? plans.first;
@@ -311,9 +382,11 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
         : '1 MONTH';
     final monthlyPrice = _monthlyPrice(product, months);
     return _PlanOption(
+      id: product.id,
       product: product,
       label: label,
       months: months,
+      price: product.price,
       monthlyPrice: monthlyPrice,
       popular: months == 12,
     );
@@ -329,72 +402,102 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
   }
 }
 
-class _FeatureRail extends StatelessWidget {
-  const _FeatureRail({required this.activeFeature});
+class _FeatureCarousel extends StatelessWidget {
+  const _FeatureCarousel({
+    required this.controller,
+    required this.currentIndex,
+    required this.onPageChanged,
+  });
 
-  final _ProFeature activeFeature;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 76,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemBuilder: (context, index) {
-          final feature = _proFeatures[index];
-          final active = feature == activeFeature;
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            width: 64,
-            height: 64,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: active
-                  ? talkflixPrimary
-                  : Colors.white.withValues(alpha: 0.13),
-              border: Border.all(
-                color: Colors.white.withValues(alpha: active ? 0 : 0.72),
-                width: 1.2,
-              ),
-            ),
-            child: Icon(feature.icon, color: Colors.white, size: 30),
-          );
-        },
-        separatorBuilder: (_, _) => const SizedBox(width: 14),
-        itemCount: _proFeatures.length,
-      ),
-    );
-  }
-}
-
-class _FeatureCopy extends StatelessWidget {
-  const _FeatureCopy({required this.feature});
-
-  final _ProFeature feature;
+  final PageController controller;
+  final int currentIndex;
+  final ValueChanged<int> onPageChanged;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            feature.title,
-            style: theme.textTheme.headlineMedium?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-            ),
+        SizedBox(
+          height: 178,
+          child: PageView.builder(
+            controller: controller,
+            itemCount: _proFeatures.length,
+            onPageChanged: onPageChanged,
+            itemBuilder: (context, index) {
+              final feature = _proFeatures[index];
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.13),
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.28),
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 58,
+                          height: 58,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: talkflixPrimary,
+                          ),
+                          child: Icon(
+                            feature.icon,
+                            color: Colors.white,
+                            size: 30,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          feature.title,
+                          style: theme.textTheme.headlineSmall?.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          feature.subtitle,
+                          style: theme.textTheme.bodyLarge?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.78),
+                            height: 1.25,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
-        const SizedBox(height: 6),
-        Text(
-          feature.subtitle,
-          style: theme.textTheme.titleMedium?.copyWith(
-            color: Colors.white.withValues(alpha: 0.78),
-            height: 1.28,
-          ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (var index = 0; index < _proFeatures.length; index++) ...[
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                width: index == currentIndex ? 22 : 7,
+                height: 7,
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                decoration: BoxDecoration(
+                  color: index == currentIndex
+                      ? talkflixPrimary
+                      : Colors.white.withValues(alpha: 0.42),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ],
+          ],
         ),
       ],
     );
@@ -455,7 +558,7 @@ class _PlanCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        plan.product.price,
+                        plan.price,
                         style: theme.textTheme.titleLarge?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
@@ -583,16 +686,20 @@ class _StatusBanner extends StatelessWidget {
 
 class _PlanOption {
   const _PlanOption({
-    required this.product,
+    required this.id,
     required this.label,
     required this.months,
+    required this.price,
     required this.monthlyPrice,
     required this.popular,
+    this.product,
   });
 
-  final ProductDetails product;
+  final String id;
+  final ProductDetails? product;
   final String label;
   final int months;
+  final String price;
   final String monthlyPrice;
   final bool popular;
 }

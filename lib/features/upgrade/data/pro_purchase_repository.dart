@@ -75,6 +75,37 @@ class ProPurchaseRepository {
     );
   }
 
+  Future<ProStripePlanQueryResult> queryStripePlans() async {
+    final data = await _ref
+        .read(apiClientProvider)
+        .getJson('/billing/pro/stripe-plans');
+    final rawPlans = data['plans'] as List<dynamic>? ?? const <dynamic>[];
+    return ProStripePlanQueryResult(
+      checkoutAvailable: data['checkoutAvailable'] == true,
+      plans: rawPlans
+          .whereType<Map<String, dynamic>>()
+          .map(ProStripePlan.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  Future<ProStripeCheckoutSession> createStripeCheckoutSession({
+    required String planId,
+  }) async {
+    final data = await _ref
+        .read(apiClientProvider)
+        .postJson(
+          '/billing/pro/stripe-checkout-sessions',
+          body: <String, dynamic>{'planId': planId},
+          timeout: const Duration(seconds: 30),
+          retries: 0,
+        );
+    return ProStripeCheckoutSession(
+      id: data['id']?.toString() ?? '',
+      url: data['url']?.toString() ?? '',
+    );
+  }
+
   Future<bool> buyProduct({
     required ProductDetails product,
     String applicationUserName = '',
@@ -165,6 +196,58 @@ class ProProductQueryResult {
   final List<ProductDetails> products;
   final List<String> notFoundIds;
   final String? error;
+}
+
+class ProStripePlanQueryResult {
+  const ProStripePlanQueryResult({
+    required this.checkoutAvailable,
+    required this.plans,
+  });
+
+  final bool checkoutAvailable;
+  final List<ProStripePlan> plans;
+}
+
+class ProStripePlan {
+  const ProStripePlan({
+    required this.id,
+    required this.label,
+    required this.months,
+    required this.currency,
+    required this.amountCents,
+    required this.price,
+    required this.monthlyPrice,
+    required this.popular,
+  });
+
+  factory ProStripePlan.fromJson(Map<String, dynamic> json) {
+    return ProStripePlan(
+      id: json['id']?.toString() ?? '',
+      label: json['label']?.toString() ?? '',
+      months: int.tryParse(json['months']?.toString() ?? '') ?? 1,
+      currency: json['currency']?.toString() ?? 'usd',
+      amountCents: int.tryParse(json['amountCents']?.toString() ?? '') ?? 0,
+      price: json['price']?.toString() ?? '',
+      monthlyPrice: json['monthlyPrice']?.toString() ?? '',
+      popular: json['popular'] == true,
+    );
+  }
+
+  final String id;
+  final String label;
+  final int months;
+  final String currency;
+  final int amountCents;
+  final String price;
+  final String monthlyPrice;
+  final bool popular;
+}
+
+class ProStripeCheckoutSession {
+  const ProStripeCheckoutSession({required this.id, required this.url});
+
+  final String id;
+  final String url;
 }
 
 class VerifiedProPurchase {
