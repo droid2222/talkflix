@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -26,6 +27,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
   String _selectedProductId = '';
   late final PageController _featurePageController;
   late int _featurePageIndex;
+  Timer? _featureAutoLoopTimer;
 
   @override
   void initState() {
@@ -35,6 +37,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
       initialPage: _featurePageIndex,
       viewportFraction: 0.88,
     );
+    _startFeatureAutoLoop();
     if (kIsWeb && Uri.base.queryParameters['checkout'] == 'success') {
       Future<void>.microtask(() async {
         try {
@@ -48,8 +51,26 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
 
   @override
   void dispose() {
+    _featureAutoLoopTimer?.cancel();
     _featurePageController.dispose();
     super.dispose();
+  }
+
+  void _startFeatureAutoLoop() {
+    _featureAutoLoopTimer?.cancel();
+    _featureAutoLoopTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!mounted || !_featurePageController.hasClients) return;
+      final nextIndex = (_featurePageIndex + 1) % _proFeatures.length;
+      _featurePageController.animateToPage(
+        nextIndex,
+        duration: const Duration(milliseconds: 380),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  void _restartFeatureAutoLoop() {
+    _startFeatureAutoLoop();
   }
 
   @override
@@ -65,7 +86,20 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
         : _planOptions(purchaseState.products);
     final selectedPlan = _selectedPlan(plans);
     final selectedProduct = selectedPlan?.product;
+    final mediaSize = MediaQuery.sizeOf(context);
     final topPadding = MediaQuery.paddingOf(context).top;
+    final compactPaywall = mediaSize.width < 390 || mediaSize.height < 760;
+    final horizontalPadding = compactPaywall ? 18.0 : 22.0;
+    final topContentPadding = math.max(
+      6.0,
+      (compactPaywall ? 12.0 : 18.0) - topPadding,
+    );
+    final logoHeight = compactPaywall ? 38.0 : 50.0;
+    final afterCloseSpacing = compactPaywall ? 2.0 : 8.0;
+    final afterLogoSpacing = compactPaywall ? 10.0 : 18.0;
+    final afterSubtitleSpacing = compactPaywall ? 14.0 : 24.0;
+    final afterCarouselSpacing = compactPaywall ? 16.0 : 24.0;
+    final planSpacing = compactPaywall ? 8.0 : 12.0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -93,9 +127,9 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
-                      22,
-                      math.max(8, 18 - topPadding),
-                      22,
+                      horizontalPadding,
+                      topContentPadding,
+                      horizontalPadding,
                       24,
                     ),
                     child: Column(
@@ -114,23 +148,27 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                             icon: const Icon(Icons.close_rounded),
                           ),
                         ),
-                        const SizedBox(height: 8),
+                        SizedBox(height: afterCloseSpacing),
                         Image.asset(
                           'assets/images/talkflix_logo.png',
-                          height: 50,
+                          height: logoHeight,
                           fit: BoxFit.contain,
                         ),
-                        const SizedBox(height: 18),
+                        SizedBox(height: afterLogoSpacing),
                         Text(
                           'Talkflix Pro',
                           textAlign: TextAlign.center,
-                          style: theme.textTheme.displaySmall?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w900,
-                            height: 0.98,
-                          ),
+                          style:
+                              (compactPaywall
+                                      ? theme.textTheme.headlineMedium
+                                      : theme.textTheme.displaySmall)
+                                  ?.copyWith(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w900,
+                                    height: 0.98,
+                                  ),
                         ),
-                        const SizedBox(height: 8),
+                        const SizedBox(height: 6),
                         Text(
                           'Remove the daily waits and keep language practice moving.',
                           textAlign: TextAlign.center,
@@ -139,7 +177,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        const SizedBox(height: 24),
+                        SizedBox(height: afterSubtitleSpacing),
                         _FeatureCarousel(
                           controller: _featurePageController,
                           currentIndex: _featurePageIndex,
@@ -147,9 +185,10 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                             setState(() {
                               _featurePageIndex = index;
                             });
+                            _restartFeatureAutoLoop();
                           },
                         ),
-                        const SizedBox(height: 24),
+                        SizedBox(height: afterCarouselSpacing),
                         if (isProLike) ...[
                           const _StatusBanner(
                             text: 'Talkflix Pro is active on this account.',
@@ -210,7 +249,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                                 });
                               },
                             ),
-                            const SizedBox(height: 12),
+                            SizedBox(height: planSpacing),
                           ],
                         ],
                         const SizedBox(height: 12),
@@ -420,10 +459,10 @@ class _FeatureCarousel extends StatelessWidget {
     final textScale = MediaQuery.textScalerOf(context).scale(1);
     final compact = width < 390;
     final cardHeight = math
-        .max(compact ? 220.0 : 204.0, 188.0 + ((textScale - 1.0) * 96.0))
-        .clamp(204.0, 286.0);
-    final cardPadding = compact ? 16.0 : 20.0;
-    final iconSize = compact ? 50.0 : 58.0;
+        .max(compact ? 136.0 : 152.0, 128.0 + ((textScale - 1.0) * 70.0))
+        .clamp(136.0, 220.0);
+    final cardPadding = compact ? 14.0 : 16.0;
+    final iconSize = compact ? 44.0 : 50.0;
     return Column(
       children: [
         SizedBox(
@@ -446,9 +485,8 @@ class _FeatureCarousel extends StatelessWidget {
                   ),
                   child: Padding(
                     padding: EdgeInsets.all(cardPadding),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         Container(
                           width: iconSize,
@@ -460,33 +498,39 @@ class _FeatureCarousel extends StatelessWidget {
                           child: Icon(
                             feature.icon,
                             color: Colors.white,
-                            size: compact ? 26 : 30,
+                            size: compact ? 24 : 28,
                           ),
                         ),
-                        SizedBox(height: compact ? 10 : 14),
-                        Text(
-                          feature.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style:
-                              (compact
-                                      ? theme.textTheme.titleLarge
-                                      : theme.textTheme.headlineSmall)
-                                  ?.copyWith(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                        ),
-                        const SizedBox(height: 6),
-                        Flexible(
-                          child: Text(
-                            feature.subtitle,
-                            maxLines: compact ? 4 : 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodyLarge?.copyWith(
-                              color: Colors.white.withValues(alpha: 0.78),
-                              height: 1.22,
-                            ),
+                        SizedBox(width: compact ? 12 : 14),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                feature.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style:
+                                    (compact
+                                            ? theme.textTheme.titleMedium
+                                            : theme.textTheme.titleLarge)
+                                        ?.copyWith(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                feature.subtitle,
+                                maxLines: compact ? 3 : 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: Colors.white.withValues(alpha: 0.78),
+                                  height: 1.18,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -497,15 +541,15 @@ class _FeatureCarousel extends StatelessWidget {
             },
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             for (var index = 0; index < _proFeatures.length; index++) ...[
               AnimatedContainer(
                 duration: const Duration(milliseconds: 160),
-                width: index == currentIndex ? 22 : 7,
-                height: 7,
+                width: index == currentIndex ? 20 : 6,
+                height: 6,
                 margin: const EdgeInsets.symmetric(horizontal: 3),
                 decoration: BoxDecoration(
                   color: index == currentIndex
@@ -540,6 +584,7 @@ class _PlanCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final compact = MediaQuery.sizeOf(context).width < 390;
     final borderColor = selected
         ? talkflixPrimary
         : Colors.white.withValues(alpha: 0.72);
@@ -551,14 +596,19 @@ class _PlanCard extends StatelessWidget {
       children: [
         InkWell(
           onTap: disabled ? null : onTap,
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(20),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 160),
             width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+            padding: EdgeInsets.fromLTRB(
+              compact ? 16 : 20,
+              compact ? 14 : 18,
+              compact ? 16 : 20,
+              compact ? 14 : 18,
+            ),
             decoration: BoxDecoration(
               color: fillColor,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(20),
               border: Border.all(color: borderColor, width: 1.6),
             ),
             child: Row(
@@ -574,13 +624,17 @@ class _PlanCard extends StatelessWidget {
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                      const SizedBox(height: 4),
+                      const SizedBox(height: 2),
                       Text(
                         plan.price,
-                        style: theme.textTheme.titleLarge?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                        ),
+                        style:
+                            (compact
+                                    ? theme.textTheme.titleMedium
+                                    : theme.textTheme.titleLarge)
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                ),
                       ),
                     ],
                   ),
@@ -600,10 +654,14 @@ class _PlanCard extends StatelessWidget {
                     children: [
                       Text(
                         plan.monthlyPrice,
-                        style: theme.textTheme.titleLarge?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                        ),
+                        style:
+                            (compact
+                                    ? theme.textTheme.titleMedium
+                                    : theme.textTheme.titleLarge)
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                ),
                       ),
                       Text(
                         'per month',
@@ -620,10 +678,13 @@ class _PlanCard extends StatelessWidget {
         ),
         if (plan.popular)
           Positioned(
-            top: -13,
-            left: 32,
+            top: -12,
+            left: compact ? 22 : 32,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+              padding: EdgeInsets.symmetric(
+                horizontal: compact ? 14 : 18,
+                vertical: 5,
+              ),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(8),
@@ -633,6 +694,7 @@ class _PlanCard extends StatelessWidget {
                 style: TextStyle(
                   color: talkflixPrimary,
                   fontWeight: FontWeight.w900,
+                  fontSize: 12,
                   letterSpacing: 0,
                 ),
               ),
