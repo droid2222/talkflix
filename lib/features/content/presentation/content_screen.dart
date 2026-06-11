@@ -1774,15 +1774,8 @@ class _PodcastCaptionPlayerState extends ConsumerState<_PodcastCaptionPlayer> {
         _watchLimitReached = true;
         await _player.pause();
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error.message),
-            action: SnackBarAction(
-              label: 'Upgrade',
-              onPressed: () => context.go('/app/upgrade'),
-            ),
-          ),
-        );
+        final feature = Uri.encodeQueryComponent('Unlimited watch time');
+        context.go('/app/upgrade?feature=$feature');
       }
     } catch (_) {
       // Usage reporting is best-effort during transient connectivity issues.

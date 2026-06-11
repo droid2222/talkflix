@@ -305,7 +305,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/app/upgrade',
-            builder: (context, state) => const UpgradeScreen(),
+            builder: (context, state) => UpgradeScreen(
+              featureName: state.uri.queryParameters['feature'] ?? '',
+            ),
           ),
           GoRoute(
             path: '/app/profile',

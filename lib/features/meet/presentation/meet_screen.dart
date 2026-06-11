@@ -164,8 +164,6 @@ class _MeetScreenState extends ConsumerState<MeetScreen> {
         : learningLanguage;
     final matchSummary = session.user?.isProLike == true
         ? 'Match unlocked'
-        : session.user?.trialUsed == false
-        ? 'Free trial available'
         : 'Match locked';
 
     return Scaffold(

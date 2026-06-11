@@ -378,15 +378,8 @@ class _ContentVideoScreenState extends ConsumerState<ContentVideoScreen> {
         _watchLimitReached = true;
         await controller.pause();
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error.message),
-            action: SnackBarAction(
-              label: 'Upgrade',
-              onPressed: () => context.go('/app/upgrade'),
-            ),
-          ),
-        );
+        final feature = Uri.encodeQueryComponent('Unlimited watch time');
+        context.go('/app/upgrade?feature=$feature');
       }
     } catch (_) {
       // Watch accounting must not crash playback for transient network issues.

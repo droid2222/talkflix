@@ -1,8 +1,10 @@
 # Talkflix Pro Entitlements
 
-Last updated: 2026-06-07
+Last updated: 2026-06-11
 
-Talkflix Pro is positioned as uninterrupted access. Free users can try the main app features, but daily limits create waits and interruptions. Pro, trial, admin, and superadmin users bypass these free-plan limits.
+Talkflix Pro is positioned as uninterrupted access. Free users can try the main app features, but daily limits create waits and interruptions. Pro, admin, and superadmin users bypass these free-plan limits.
+
+The app no longer presents a free-trial upgrade option. When a free user taps a Pro-only feature or reaches a daily free limit, the app navigates directly to the Pro purchase screen.
 
 ## Current Free Defaults
 
@@ -84,4 +86,4 @@ Flutter files:
 /Users/talkflix/talkflix_flutter/lib/features/content/presentation/content_screen.dart
 ```
 
-The upgrade screen now describes Pro as uninterrupted access: unlimited videos/podcasts, direct calls, live-room audience time, hosting, stage time, chat translations, and advanced partner discovery.
+The upgrade screen now uses a full-screen paywall with Talkflix branding, feature icons, the triggering feature copy when available, and store-driven plan cards for monthly, six-month, and yearly subscriptions. The yearly plan is highlighted as the most popular plan, and all prices shown come from App Store / Google Play product data.
