@@ -1,21 +1,23 @@
 # Talkflix v1 Release Handoff
 
-Last updated: 2026-06-05
+Last updated: 2026-06-10
 
 This document is the practical handoff for the current v1 release branch. It is written for a future developer or team that needs to continue the app without relying on chat history.
 
+**Related docs:** [docs/README.md](README.md) (index), [local-development.md](local-development.md) (portable setup), [architecture.md](architecture.md), [configuration.md](configuration.md).
+
 ## Repositories And Production Paths
 
-Flutter app:
+Flutter app (this repository):
 
 ```text
-/Users/talkflix/talkflix_flutter
+talkflix_flutter/
 ```
 
-Backend API:
+Backend API (separate checkout; on the primary dev machine often at `/Users/genius/talkflixproject/talkflix-api`):
 
 ```text
-/Users/genius/talkflixproject/talkflix-api
+$TALKFLIX_API_ROOT   # see local-development.md
 ```
 
 Production backend path on the droplet:

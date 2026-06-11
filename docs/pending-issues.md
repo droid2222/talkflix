@@ -1,94 +1,74 @@
-# Pending Issues
+# Pending issues
 
-Last updated: 2026-05-01
+Last updated: 2026-06-10
 
-This file is the client/app-side source of truth for open issues that still need coordinated work.
+Open product and engineering risks for the Talkflix client and its API. For launch scope, blockers, and resolved items, see [v1-release-handoff.md](v1-release-handoff.md).
 
-How to use it:
+**How to use this file**
 
-- Update this file in every PR that changes the status, root-cause understanding, or proposed solution for one of these items.
-- Prefer concrete dates, exact symptoms, and links to the relevant GitHub issue/PR once those exist.
-- If an item also needs backend or infrastructure work, note that explicitly instead of assuming ownership.
+- Update an item when status, root cause, or owner changes.
+- Add the date and a one-line summary in the item when you close or downgrade it.
+- Link GitHub issues/PRs when they exist.
 
 ## 1. Voice room stage unmute fails on iPhone
 
 - Severity: P1
 - Status: Open
-- Repos: `talkflix`, `talkflix-api`
+- Repos: `talkflix_flutter`, `talkflix-api`
 - Current behavior:
-  - In current iPhone testing, a listener can join stage muted, but the first unmute can fail and local audio does not start.
-  - The observed native log is `AUIOClient_StartIO failed (-66637)`.
-- What is already true:
-  - Audio rooms now use the LiveKit SFU path by default.
-  - Stage approval is ack-driven.
-  - Users join stage muted by default for privacy.
-  - Host remove-from-stage is backend-authoritative.
-- Current understanding:
-  - The failure now occurs on the first local microphone start when the app enables the mic on unmute.
-  - The earlier “auto-start mic on stage join” path is no longer the active failure point.
+  - Listener can join stage muted, but the first unmute can fail; local audio does not start.
+  - Observed native log: `AUIOClient_StartIO failed (-66637)`.
+- Context:
+  - Audio rooms use LiveKit SFU by default (`AppConfig.liveUseSfuAudio`).
+  - Stage approval is ack-driven; users join stage muted by default.
 - Proposed next step:
-  - Reproduce on a physical iPhone while collecting Xcode device logs plus client-side room/publish state.
-  - Confirm whether the remaining failure is permission-related, `AVAudioSession`-related, or LiveKit publish startup.
-  - Do not mark this fixed until a real two-device stage flow passes end to end.
+  - Reproduce on a physical iPhone with Xcode device logs and LiveKit publish state.
+  - Confirm permission vs `AVAudioSession` vs LiveKit publish startup.
 - GitHub issue: TBD
 
-## 2. Live audio restrictive-network reliability is not production-complete
+## 2. Live audio on restrictive networks
 
 - Severity: P1
-- Status: Open
-- Repos: `talkflix`, `talkflix-api`
+- Status: Open (accepted launch risk per handoff 2026-06-05 — revisit if users report failures)
+- Repos: `talkflix_flutter`, `talkflix-api`, infrastructure
 - Current behavior:
-  - The app uses LiveKit SFU for audio rooms.
-  - The deployed stack currently works for the basic path, but TURN/TLS fallback is not yet configured.
-- Current understanding:
-  - This leaves a real risk for users on restrictive Wi-Fi, symmetric NAT, or networks where direct UDP paths fail.
-  - Stage/moderation logic can be correct while media still fails to flow on those networks.
+  - LiveKit SFU works on the common path; TURN/TLS fallback is not fully configured.
+- Risk:
+  - Restrictive Wi‑Fi, symmetric NAT, or UDP-blocking networks may fail media while signaling still works.
 - Proposed solution:
-  - Add TURN/TLS fallback on the backend/infrastructure side.
-  - Keep the app-side validation matrix explicit: LTE to Wi-Fi, Wi-Fi to LTE, and two restrictive-network cases.
+  - Add TURN/TLS on infrastructure; validate LTE↔Wi‑Fi and two restrictive-network cases.
 - GitHub issue: TBD
 
-## 3. Direct 1:1 call reliability is still best-effort
+## 3. Direct 1:1 call reliability (P2P)
 
 - Severity: P2
 - Status: Open
-- Repos: `talkflix`, `talkflix-api`
+- Repos: `talkflix_flutter`, `talkflix-api`
 - Current behavior:
-  - Direct audio/video calls still use the existing P2P WebRTC path.
-  - Default RTC config falls back to STUN-only unless TURN is provided via environment overrides.
-- Current understanding:
-  - This is acceptable for development and some production networks, but not reliable enough to treat as fully solved.
+  - Direct calls use P2P WebRTC; default ICE is STUN-only unless `RTC_TURN_*` dart-defines are set.
 - Proposed solution:
-  - Add TURN configuration for the direct-call path.
-  - If product expectations become stricter, evaluate whether direct calls should stay P2P or move to a relayed media design.
+  - Production TURN for direct calls, or move to relayed media if product requirements tighten.
 - GitHub issue: TBD
 
-## 4. Direct-message media and history do not scale yet
+## 4. Direct-message media and history scale
 
 - Severity: P2
 - Status: Open
-- Repos: `talkflix`, `talkflix-api`
+- Repos: `talkflix-api` (primary), `talkflix_flutter`
 - Current behavior:
-  - DM media is still handled as inline/base64 payloads.
-  - Full thread fetches still happen without real pagination.
-- Current understanding:
-  - This is workable for small conversations, but it is the wrong storage and retrieval model for larger chats.
+  - DM media can be inline/base64; thread history is not paginated end-to-end.
 - Proposed solution:
-  - Move media to object storage and persist references instead of inline blobs.
-  - Add paginated message history APIs and client-side pagination.
+  - Object storage for media; paginated history APIs and client paging.
 - GitHub issue: TBD
 
-## 5. iOS distribution is still pending
+## 5. iOS App Store distribution workflow
 
 - Severity: P2
-- Status: Open
-- Repos: `talkflix`
+- Status: In progress
+- Repo: `talkflix_flutter`
 - Current behavior:
-  - The app can be run from Xcode and built locally.
-  - App Store Connect / TestFlight signing and distribution are not yet completed in this repo workflow.
-- Current understanding:
-  - Backend hosting on the droplet does not remove the need for proper iOS signing and distribution.
+  - `flutter build ios` and `flutter build ipa` succeed locally with team `VPZ2LX24TZ`.
+  - App Store Connect / TestFlight upload and reviewer account packaging are tracked in [app_store_submission_checklist.md](app_store_submission_checklist.md).
 - Proposed solution:
-  - Complete Apple signing/provisioning, archive flow, and TestFlight distribution.
-  - Document the release steps once the first successful TestFlight upload is complete.
+  - Complete first TestFlight upload; document exact Xcode/Transporter steps in handoff once done.
 - GitHub issue: TBD

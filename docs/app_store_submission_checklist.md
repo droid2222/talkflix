@@ -1,10 +1,10 @@
 # Talkflix App Store Submission Checklist
 
-This checklist reflects the v1 release branch as of 2026-06-05.
+This checklist reflects the v1 release branch as of 2026-06-10.
 
-Before using this checklist, read the implementation handoff in [`docs/v1-release-handoff.md`](/Users/talkflix/talkflix_flutter/docs/v1-release-handoff.md). That document explains the current feature gates, IAP product IDs, direct-call behavior, diagnostics policy, iOS launch-screen fix, homepage preservation rule, and production setup dependencies.
+Before using this checklist, read [v1-release-handoff.md](v1-release-handoff.md) (feature gates, IAP, diagnostics policy, launch blockers) and [qa-manual.md](qa-manual.md) (device QA).
 
-The public web homepage preservation details are in [`docs/web-homepage.md`](/Users/talkflix/talkflix_flutter/docs/web-homepage.md). Verify the homepage, Terms of Service link, Privacy Policy link, and Account Deletion link before submission.
+The public web homepage preservation details are in [web-homepage.md](web-homepage.md). Verify the homepage, Terms of Service link, Privacy Policy link, and Account Deletion link before submission.
 
 ## V1 Release Scope
 
