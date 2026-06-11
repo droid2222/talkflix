@@ -55,13 +55,24 @@ The Node.js API is **not** inside this Flutter repo. Typical layouts:
 | Layout | API path |
 | --- | --- |
 | Sibling folder | `../talkflix-api` next to `talkflix_flutter` |
-| Legacy primary dev machine | `/Users/genius/talkflixproject/talkflix-api` |
+| Existing custom checkout | Set `TALKFLIX_API_ROOT` to that local path |
 
 Set an environment variable so scripts and docs match your machine:
 
 ```bash
 export TALKFLIX_API_ROOT=/path/to/talkflix-api
 ```
+
+Optional production/admin helpers used by ops docs:
+
+```bash
+export TALKFLIX_PROD_HOST=root@your-production-host
+export TALKFLIX_SSH_KEY=~/.ssh/your-production-key
+export TALKFLIX_WEB_ROOT=/var/www/talkflix-web
+export TALKFLIX_ADMIN_WEB_ROOT=/var/www/talkflix-admin
+```
+
+Do not commit real production hosts, private key paths, API keys, signing files, or `.env` values.
 
 Run locally:
 
@@ -101,7 +112,7 @@ Open `ios/Runner.xcworkspace` in Xcode for device signing. Team id is set in the
 
 In **debug** builds only (`flutter run`, not `--release`):
 
-- Profile → Manage Storage → Diagnostics (debug menu label)
+- Profile → Settings → Diagnostics (debug-only entry)
 - Routes: `/app/profile/diagnostics`, `/app/profile/qa-checklist`, `/app/profile/media-preview`
 
 These are gated by `AppConfig.localQaToolsEnabled` (`kDebugMode`). See [configuration.md](configuration.md).

@@ -55,6 +55,7 @@ Examples of routes that must continue loading the Flutter app:
 /coaching/<product-slug>
 /terms-of-service
 /privacy-policy
+/support
 /account-deletion
 /s/:token
 /w/:token
@@ -79,10 +80,11 @@ Legal routes used by the footer:
 ```text
 /terms-of-service
 /privacy-policy
+/support
 /account-deletion
 ```
 
-The account deletion route is a public store-review support page. It must remain accessible without signing in.
+The support and account deletion routes are public store-review support pages. They must remain accessible without signing in.
 
 The public coaching route is web-only and public:
 
@@ -131,7 +133,7 @@ Before changing web routing, homepage UI, share-link handling, authentication re
 - Confirm `/` shows the static branded homepage with the hero background and transparent logo.
 - Confirm `/login`, `/signup`, `/app/*`, `/coaching`, legal routes, and share links still load Flutter correctly.
 - Confirm logged-in web users can still enter the app from the homepage login/open-app actions.
-- Confirm footer links to `/terms-of-service`, `/privacy-policy`, and `/account-deletion` work.
+- Confirm footer links to `/terms-of-service`, `/privacy-policy`, `/support`, and `/account-deletion` work.
 - Run `tool/check_web_homepage.sh`.
 - Run `tool/build_web_preserving_homepage.sh`.
 - If possible, open the built web app locally or on staging and verify desktop layout, mobile layout, and first-load logo.

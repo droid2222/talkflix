@@ -90,7 +90,7 @@ Web commerce is separate from Talkflix Pro.
 Backend source:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/server.js
+$TALKFLIX_API_ROOT/server.js
 ```
 
 Public endpoints:

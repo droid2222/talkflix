@@ -1,6 +1,6 @@
 # Production Backup Retention
 
-Last updated: 2026-06-05
+Last updated: 2026-06-11
 
 This policy exists to keep Talkflix production rollback files useful without letting old one-off backups accumulate or expose secrets.
 
@@ -182,7 +182,7 @@ Production path affected:
 Deployment source:
 
 ```text
-/Users/talkflix/talkflix_flutter/build/web
+build/web
 ```
 
 Verification performed:
@@ -218,7 +218,7 @@ Production path affected:
 Deployment source:
 
 ```text
-/Users/talkflix/talkflix_flutter/build/web
+build/web
 ```
 
 Verification performed:
@@ -259,7 +259,7 @@ Production path affected:
 Deployment source:
 
 ```text
-/Users/talkflix/talkflix_flutter/build/web
+build/web
 ```
 
 Verification performed:
@@ -301,7 +301,7 @@ Production paths affected:
 Verification performed:
 
 ```text
-node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+node --check "$TALKFLIX_API_ROOT/server.js": passed
 admin dashboard inline script syntax check: passed
 node --check /opt/talkflix-api/server.js: passed
 pm2 restart talkflix-api: passed
@@ -343,7 +343,7 @@ Verification performed:
 
 ```text
 dart analyze edited Dart files: passed
-node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+node --check "$TALKFLIX_API_ROOT/server.js": passed
 admin dashboard inline script syntax check: passed
 tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
 node --check /opt/talkflix-api/server.js: passed
@@ -417,7 +417,7 @@ Verification performed:
 
 ```text
 dart analyze edited commerce Dart files: passed
-node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+node --check "$TALKFLIX_API_ROOT/server.js": passed
 admin dashboard inline script syntax check: passed
 tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
 node --check /opt/talkflix-api/server.js: passed
@@ -461,7 +461,7 @@ Verification performed:
 
 ```text
 dart analyze edited commerce Dart files: passed
-node --check /Users/genius/talkflixproject/talkflix-api/server.js: passed
+node --check "$TALKFLIX_API_ROOT/server.js": passed
 admin dashboard inline script syntax check: passed
 tool/build_web_preserving_homepage.sh --no-wasm-dry-run: passed
 node --check /opt/talkflix-api/server.js: passed
@@ -574,4 +574,41 @@ https://www.talkflix.cc/ returned HTTP 200
 https://www.talkflix.cc/app/upgrade?feature=Direct%20calling returned HTTP 200
 https://api.talkflix.cc/billing/pro/stripe-plans returned checkoutAvailable=true and monthly/six-month/yearly Stripe plans
 POST https://api.talkflix.cc/billing/pro/stripe-checkout-sessions without auth returned Unauthorized
+```
+
+### 2026-06-11 Public Support Page
+
+Reason:
+
+- Added a real public `/support` route for App Store / Play Console support metadata.
+- Added a Support footer link on the static public homepage.
+- Deployed a guarded Flutter web build without replacing the static public homepage.
+
+Production backup created:
+
+```text
+/root/talkflix-production-backups/20260611-public-support-page/
+```
+
+Backup contents:
+
+```text
+/root/talkflix-production-backups/20260611-public-support-page/talkflix-web-before.tar.gz
+```
+
+Deployed files:
+
+```text
+/var/www/talkflix-web
+```
+
+Verification performed:
+
+```text
+dart analyze: passed
+tool/build_web_preserving_homepage.sh: passed
+https://www.talkflix.cc/support returned HTTP 200 with no-store cache headers
+https://www.talkflix.cc/ contains footer href="/support"
+https://www.talkflix.cc/main.dart.js contains /support and Talkflix Support
+Production /var/www/talkflix-web/main.dart.js contains /support and Talkflix Support
 ```

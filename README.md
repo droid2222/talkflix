@@ -25,12 +25,17 @@ Full index: **[docs/README.md](docs/README.md)**
 | --- | --- |
 | App structure | [docs/architecture.md](docs/architecture.md) |
 | Feature flags & `--dart-define` | [docs/configuration.md](docs/configuration.md) |
+| Backend contracts | [docs/backend-contracts.md](docs/backend-contracts.md) |
+| Supported scripts | [docs/repository-scripts.md](docs/repository-scripts.md) |
 | Manual QA | [docs/qa-manual.md](docs/qa-manual.md) |
 | **V1 launch handoff** | [docs/v1-release-handoff.md](docs/v1-release-handoff.md) |
 | App Store / Play checklist | [docs/app_store_submission_checklist.md](docs/app_store_submission_checklist.md) |
 | Open engineering issues | [docs/pending-issues.md](docs/pending-issues.md) |
 | Admin dashboard (production) | [docs/admin-dashboard.md](docs/admin-dashboard.md) |
 | Public web homepage | [docs/web-homepage.md](docs/web-homepage.md) |
+| Web commerce | [docs/web-commerce.md](docs/web-commerce.md) |
+| Pro entitlements | [docs/pro-entitlements.md](docs/pro-entitlements.md) |
+| Production backups | [docs/production-backup-retention.md](docs/production-backup-retention.md) |
 
 ## Current product scope
 
@@ -59,3 +64,5 @@ Diagnostics, QA checklist, and media preview are available only in **debug** bui
 dart analyze
 flutter test
 ```
+
+Contributor workflow: [CONTRIBUTING.md](CONTRIBUTING.md). Recent notable changes: [CHANGELOG.md](CHANGELOG.md).

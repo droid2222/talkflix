@@ -10,6 +10,7 @@ Runtime configuration is centralized in `lib/core/config/app_config.dart`. Build
 | --- | --- | --- |
 | `AppConfig.apiBaseUrl` | `https://api.talkflix.cc` | REST and socket base (unless overridden) |
 | `AppConfig.publicMarketingUrl` | `https://www.talkflix.cc` | Marketing, SMS invite, share links |
+| `AppConfig.supportUrl` | `https://www.talkflix.cc/support` | Public store-review support URL |
 | `AppConfig.accountDeletionUrl` | `https://www.talkflix.cc/account-deletion` | Store metadata and legal links |
 | `AppConfig.supportEmail` | `info@talkflix.cc` | Help and deletion email templates |
 

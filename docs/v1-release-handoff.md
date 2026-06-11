@@ -14,7 +14,7 @@ Flutter app (this repository):
 talkflix_flutter/
 ```
 
-Backend API (separate checkout; on the primary dev machine often at `/Users/genius/talkflixproject/talkflix-api`):
+Backend API (separate checkout):
 
 ```text
 $TALKFLIX_API_ROOT   # see local-development.md
@@ -52,7 +52,7 @@ V1 includes:
 - Live room browse/create/join flows.
 - Meet/discovery flows and Pro-gated discovery behavior.
 - Talkflix Pro subscriptions through native App Store and Google Play IAP.
-- Public homepage, privacy policy, terms, and account deletion routes.
+- Public homepage, support, privacy policy, terms, and account deletion routes.
 
 The public web homepage is launch-critical. Preserve the static `/` route, source file, required assets, footer legal links, and guarded build workflow documented in:
 
@@ -67,6 +67,29 @@ Production restore note: the static homepage was restored on 2026-06-09 from gua
 The `/coaching` web route and `/commerce/products` backend route are deployed, but Stripe checkout is not payment-ready until production `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are added and PM2 is restarted.
 
 The obsolete Flutter public homepage was removed on 2026-06-09. Public Home buttons in Flutter web routes must use `openPublicHome(context)` so they perform a full browser navigation to the static homepage instead of `context.go('/')`.
+
+## Public Support And Account Deletion Routes
+
+The public support URL is:
+
+```text
+https://www.talkflix.cc/support
+```
+
+Client files:
+
+```text
+lib/features/legal/presentation/support_screen.dart
+lib/app/router/app_router.dart
+lib/core/config/app_config.dart
+```
+
+Important details:
+
+- `/support` is in the router `publicLocations` set and must stay reachable without signing in.
+- `AppConfig.supportUrl` centralizes the public URL used by store metadata.
+- The homepage footer links to `/support` next to Terms of Service, Privacy Policy, and account deletion.
+- Store-review verification must confirm the page visibly renders Talkflix Support content. A generic HTTP 200 from the Flutter shell is not enough.
 
 ## Public Account Deletion Route
 
@@ -88,7 +111,7 @@ Important details:
 
 - `/account-deletion` is in the router `publicLocations` set and must stay reachable without signing in.
 - `AppConfig.accountDeletionUrl` centralizes the public URL used by legal copy and store metadata.
-- The homepage footer links to `/account-deletion` next to Terms of Service and Privacy Policy.
+- The homepage footer links to `/account-deletion` next to Terms of Service, Privacy Policy, and Support.
 - Profile settings links to `/account-deletion` from the legal/settings area.
 - The page explains the in-app deletion path and the email fallback through `info@talkflix.cc`.
 - Backend account deletion currently requires the current password and soft-deletes the user by setting `deleted_at`, replacing email/username/password, clearing visible profile fields, hiding privacy fields, disabling online status, and disabling direct-call receiving.
@@ -221,8 +244,8 @@ lib/features/talk/presentation/direct_call_log_screen.dart
 Main backend areas:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/server.js
-/Users/genius/talkflixproject/talkflix-api/socket.js
+$TALKFLIX_API_ROOT/server.js
+$TALKFLIX_API_ROOT/socket.js
 ```
 
 Important current behavior:
@@ -236,7 +259,7 @@ Important current behavior:
 Known production risk:
 
 - Direct 1:1 calls still need TURN configuration for stronger reliability across restrictive networks.
-- See `docs/pending-issues.md` and `/Users/genius/talkflixproject/talkflix-api/docs/pending-issues.md`.
+- See `docs/pending-issues.md` and `$TALKFLIX_API_ROOT/docs/pending-issues.md`.
 
 ## Pro IAP
 
@@ -275,8 +298,8 @@ lib/features/upgrade/presentation/upgrade_screen.dart
 Backend verification:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/server.js
-/Users/genius/talkflixproject/talkflix-api/migrations/003_mobile_iap_purchases_mysql.sql
+$TALKFLIX_API_ROOT/server.js
+$TALKFLIX_API_ROOT/migrations/003_mobile_iap_purchases_mysql.sql
 ```
 
 Required production environment keys:
@@ -328,9 +351,9 @@ Production deployment note:
 Backend migrations added for current release work:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/migrations/002_content_feed_upgrade_mysql.sql
-/Users/genius/talkflixproject/talkflix-api/migrations/003_mobile_iap_purchases_mysql.sql
-/Users/genius/talkflixproject/talkflix-api/migrations/004_direct_call_receive_defaults_mysql.sql
+$TALKFLIX_API_ROOT/migrations/002_content_feed_upgrade_mysql.sql
+$TALKFLIX_API_ROOT/migrations/003_mobile_iap_purchases_mysql.sql
+$TALKFLIX_API_ROOT/migrations/004_direct_call_receive_defaults_mysql.sql
 ```
 
 `004_direct_call_receive_defaults_mysql.sql` changes direct-call receive column defaults to enabled for new users. It intentionally does not backfill existing `0` values, because those may be real opt-outs.
@@ -338,7 +361,7 @@ Backend migrations added for current release work:
 Production DB verification:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/docs/production-db-migrations.md
+$TALKFLIX_API_ROOT/docs/production-db-migrations.md
 ```
 
 Verified on 2026-06-05:
@@ -385,8 +408,8 @@ tool/build_web_preserving_homepage.sh
 Backend syntax checks:
 
 ```bash
-node --check /Users/genius/talkflixproject/talkflix-api/server.js
-node --check /Users/genius/talkflixproject/talkflix-api/socket.js
+node --check "$TALKFLIX_API_ROOT/server.js"
+node --check "$TALKFLIX_API_ROOT/socket.js"
 ```
 
 iOS dependency sync after `flutter clean`:
@@ -404,8 +427,8 @@ If `pod install` says `Generated.xcconfig must exist`, run `flutter pub get` fir
 Before copying API changes to production:
 
 ```bash
-node --check /Users/genius/talkflixproject/talkflix-api/server.js
-node --check /Users/genius/talkflixproject/talkflix-api/socket.js
+node --check "$TALKFLIX_API_ROOT/server.js"
+node --check "$TALKFLIX_API_ROOT/socket.js"
 ```
 
 On production, keep backups before overwriting:
@@ -480,5 +503,5 @@ No `READ_CONTACTS`, `WRITE_CONTACTS`, `GET_ACCOUNTS`, or `android.permission.CON
 
 - Update this file whenever release scope, product IDs, feature gates, or production setup changes.
 - Update `docs/app_store_submission_checklist.md` when store-review requirements change.
-- Update `/Users/genius/talkflixproject/talkflix-api/README.md` when backend env vars or deployment steps change.
+- Update `$TALKFLIX_API_ROOT/README.md` when backend env vars or deployment steps change.
 - Prefer exact file paths, command outputs, and dates. Do not write assumptions as facts.

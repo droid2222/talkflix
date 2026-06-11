@@ -8,6 +8,7 @@ Start here if you are new to the repo or preparing a release.
 | [local-development.md](local-development.md) | Run Flutter + optional local backend on any machine |
 | [architecture.md](architecture.md) | How the Flutter app is structured |
 | [configuration.md](configuration.md) | `AppConfig`, `--dart-define`, and feature gates |
+| [backend-contracts.md](backend-contracts.md) | Flutter-owned expectations for REST, Socket.IO, and backend docs |
 | [repository-scripts.md](repository-scripts.md) | Supported `tool/` scripts and what not to run in prod |
 | [qa-manual.md](qa-manual.md) | Real-device manual QA checklist |
 | [v1-release-handoff.md](v1-release-handoff.md) | **Primary launch handoff** — scope, IAP, deployment, blockers |

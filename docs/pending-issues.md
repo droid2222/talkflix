@@ -10,9 +10,10 @@ Open product and engineering risks for the Talkflix client and its API. For laun
 - Add the date and a one-line summary in the item when you close or downgrade it.
 - Link GitHub issues/PRs when they exist.
 
-## 1. Voice room stage unmute fails on iPhone
+## TF-P1-001 Voice room stage unmute fails on iPhone
 
 - Severity: P1
+- Owner: Unassigned
 - Status: Open
 - Repos: `talkflix_flutter`, `talkflix-api`
 - Current behavior:
@@ -26,9 +27,10 @@ Open product and engineering risks for the Talkflix client and its API. For laun
   - Confirm permission vs `AVAudioSession` vs LiveKit publish startup.
 - GitHub issue: TBD
 
-## 2. Live audio on restrictive networks
+## TF-P1-002 Live audio on restrictive networks
 
 - Severity: P1
+- Owner: Unassigned
 - Status: Open (accepted launch risk per handoff 2026-06-05 — revisit if users report failures)
 - Repos: `talkflix_flutter`, `talkflix-api`, infrastructure
 - Current behavior:
@@ -39,9 +41,10 @@ Open product and engineering risks for the Talkflix client and its API. For laun
   - Add TURN/TLS on infrastructure; validate LTE↔Wi‑Fi and two restrictive-network cases.
 - GitHub issue: TBD
 
-## 3. Direct 1:1 call reliability (P2P)
+## TF-P2-003 Direct 1:1 call reliability (P2P)
 
 - Severity: P2
+- Owner: Unassigned
 - Status: Open
 - Repos: `talkflix_flutter`, `talkflix-api`
 - Current behavior:
@@ -50,9 +53,10 @@ Open product and engineering risks for the Talkflix client and its API. For laun
   - Production TURN for direct calls, or move to relayed media if product requirements tighten.
 - GitHub issue: TBD
 
-## 4. Direct-message media and history scale
+## TF-P2-004 Direct-message media and history scale
 
 - Severity: P2
+- Owner: Unassigned
 - Status: Open
 - Repos: `talkflix-api` (primary), `talkflix_flutter`
 - Current behavior:
@@ -61,9 +65,10 @@ Open product and engineering risks for the Talkflix client and its API. For laun
   - Object storage for media; paginated history APIs and client paging.
 - GitHub issue: TBD
 
-## 5. iOS App Store distribution workflow
+## TF-P2-005 iOS App Store distribution workflow
 
 - Severity: P2
+- Owner: Unassigned
 - Status: In progress
 - Repo: `talkflix_flutter`
 - Current behavior:

@@ -16,6 +16,18 @@ docs/production-backup-retention.md
 - `https://www.talkflix.cc/admin/` redirects to `https://talkflix.cc/admin/`
 - API base used by the dashboard: `/api`, proxied to the Node API
 
+## Local Ops Variables
+
+Before using SSH/SCP commands in this document, set these for your own machine:
+
+```bash
+export TALKFLIX_PROD_HOST=root@your-production-host
+export TALKFLIX_SSH_KEY=~/.ssh/your-production-key
+export TALKFLIX_API_ROOT=/path/to/talkflix-api
+```
+
+Keep real hostnames, IP addresses, private key paths, and secrets out of committed docs.
+
 ## Production Location
 
 The admin dashboard is currently a standalone static HTML app on the droplet:
@@ -45,16 +57,16 @@ The active production Nginx file is:
 /etc/nginx/sites-enabled/talkflix-web
 ```
 
-This dashboard is not the same as the Flutter app and is not the React user web app at:
+This dashboard is not the same as the Flutter app and is not the React user web app. If that web app is checked out locally, point to it with:
 
 ```text
-/Users/genius/talkflixproject/talkflix
+$TALKFLIX_WEB_APP_ROOT
 ```
 
-The backend API source is in:
+The backend API source is a separate checkout:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api
+$TALKFLIX_API_ROOT
 ```
 
 Production backend path on the droplet:
@@ -142,8 +154,8 @@ It does not end active matches and does not remove users already waiting in the 
 Backend implementation:
 
 ```text
-/Users/genius/talkflixproject/talkflix-api/server.js
-/Users/genius/talkflixproject/talkflix-api/socket.js
+$TALKFLIX_API_ROOT/server.js
+$TALKFLIX_API_ROOT/socket.js
 ```
 
 Production implementation:
@@ -156,14 +168,14 @@ Production implementation:
 ## Inspect Production Dashboard
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "grep -n \"Anonymous Match\\|Clear match history\\|reset-history\" /var/www/talkflix-admin/index.html"
 ```
 
 List admin dashboard files:
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "find /var/www/talkflix-admin -maxdepth 2 -type f -print | sort"
 ```
 
@@ -176,7 +188,7 @@ curl -sS https://api.talkflix.cc/health
 Check API process:
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "pm2 status talkflix-api"
 ```
 
@@ -185,8 +197,8 @@ ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
 1. Copy production admin HTML to a temp file.
 
 ```bash
-scp -i /Users/genius/.ssh/id_ed25519 \
-  root@134.209.119.153:/var/www/talkflix-admin/index.html \
+scp -i "$TALKFLIX_SSH_KEY" \
+  "$TALKFLIX_PROD_HOST:/var/www/talkflix-admin/index.html" \
   /private/tmp/talkflix-admin-index.html
 ```
 
@@ -195,22 +207,22 @@ scp -i /Users/genius/.ssh/id_ed25519 \
 3. Back up production before deploying.
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "cp /var/www/talkflix-admin/index.html /var/www/talkflix-admin/index.html.backup-$(date +%Y%m%d-%H%M%S)"
 ```
 
 4. Deploy the edited file.
 
 ```bash
-scp -i /Users/genius/.ssh/id_ed25519 \
+scp -i "$TALKFLIX_SSH_KEY" \
   /private/tmp/talkflix-admin-index.html \
-  root@134.209.119.153:/var/www/talkflix-admin/index.html
+  "$TALKFLIX_PROD_HOST:/var/www/talkflix-admin/index.html"
 ```
 
 5. Verify the deployed HTML contains the expected change.
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "grep -n \"EXPECTED_TEXT\" /var/www/talkflix-admin/index.html"
 ```
 
@@ -218,12 +230,12 @@ ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
 
 When admin UI changes require API changes:
 
-1. Patch local files in `/Users/genius/talkflixproject/talkflix-api`.
+1. Patch local files in `$TALKFLIX_API_ROOT`.
 2. Run syntax checks:
 
 ```bash
-node --check /Users/genius/talkflixproject/talkflix-api/server.js
-node --check /Users/genius/talkflixproject/talkflix-api/socket.js
+node --check "$TALKFLIX_API_ROOT/server.js"
+node --check "$TALKFLIX_API_ROOT/socket.js"
 ```
 
 3. Copy to production with backups.
@@ -231,7 +243,7 @@ node --check /Users/genius/talkflixproject/talkflix-api/socket.js
 5. Restart PM2:
 
 ```bash
-ssh -i /Users/genius/.ssh/id_ed25519 root@134.209.119.153 \
+ssh -i "$TALKFLIX_SSH_KEY" "$TALKFLIX_PROD_HOST" \
   "pm2 restart talkflix-api && pm2 status talkflix-api"
 ```
 

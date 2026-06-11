@@ -26,7 +26,7 @@ Deferred from v1:
 - Set the final App Store version and build number you want to ship.
 - Upload the final signed iOS archive from Xcode or Transporter.
 - Add the support contact `info@talkflix.cc`.
-- Add the privacy policy URL and marketing/support URLs in App Store Connect.
+- Add the privacy policy URL, marketing URL, and support URL in App Store Connect. Use `https://www.talkflix.cc/support` only after verifying it renders the dedicated Talkflix Support page, not just a generic app shell.
 - Add the account deletion URL in Play Console: `https://www.talkflix.cc/account-deletion`.
 - Upload the final App Store screenshots.
 - Complete the App Privacy questionnaire.
@@ -110,6 +110,7 @@ Paste and customize this in App Store Connect:
 Do not submit until all of these are true:
 
 - App Store Connect and Play Console subscription products match the app/backend product IDs.
+- App Store Connect Support URL is `https://www.talkflix.cc/support`, and the page visibly renders Talkflix Support content without sign-in.
 - Play Console account deletion URL points to `https://www.talkflix.cc/account-deletion` and the page is reachable without signing in.
 - Production API has Apple and Google purchase verification credentials configured.
 - Pro purchase and restore purchase pass sandbox QA on real devices.
