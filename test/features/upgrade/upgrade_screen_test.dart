@@ -9,7 +9,7 @@ import 'package:talkflix_flutter/features/upgrade/presentation/pro_purchase_cont
 import 'package:talkflix_flutter/features/upgrade/presentation/upgrade_screen.dart';
 
 void main() {
-  testWidgets('renders current Pro subscription plan labels', (tester) async {
+  testWidgets('renders current Pro subscription plan options', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -26,9 +26,9 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    expect(find.text('Talkflix Pro Monthly'), findsOneWidget);
-    expect(find.text('Talkflix Pro 6 Months'), findsOneWidget);
-    expect(find.text('Talkflix Pro Yearly'), findsOneWidget);
+    expect(find.text('1 MONTH'), findsOneWidget);
+    expect(find.text('6 MONTHS'), findsOneWidget);
+    expect(find.text('12 MONTHS'), findsOneWidget);
   });
 }
 
@@ -87,6 +87,9 @@ class _FakeProPurchaseController extends StateNotifier<ProPurchaseState>
 
   @override
   Future<void> buy(ProductDetails product) async {}
+
+  @override
+  Future<void> startWebCheckout(String planId) async {}
 
   @override
   Future<void> restore() async {}
