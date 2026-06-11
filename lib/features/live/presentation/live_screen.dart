@@ -66,6 +66,11 @@ const Set<String> _liveMicEffects = <String>{
   'spotlight',
 };
 
+String _normalizeMicEffect(String? value) {
+  final normalized = (value ?? '').trim().toLowerCase();
+  return _liveMicEffects.contains(normalized) ? normalized : 'pulse';
+}
+
 class LiveScreen extends ConsumerStatefulWidget {
   const LiveScreen({super.key, this.initialBroadcastId});
 
@@ -130,6 +135,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   static const _rtcSyncDebounceWindow = Duration(milliseconds: 180);
   static const _speakingEmitMinInterval = Duration(milliseconds: 850);
   static const _speakingProbeInterval = Duration(milliseconds: 700);
+  static const _videoRoomChromeHideDelay = Duration(seconds: 4);
 
   void _recordRtcTransition(String event) {
     final now = DateTime.now();
@@ -167,7 +173,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   int _broadcastRequestToken = 0;
   bool _localMicEnabled = true;
   bool _localVideoEnabled = false;
-  bool _liveSpeakerOn = true;
   bool _didInitializeStageMic = false;
   bool _wasOnStage = false;
   bool _isFollowingHost = false;
@@ -176,6 +181,9 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   int _audioRoomPageIndex = 0;
   int _videoRoomPageIndex = 0;
   bool _videoRoomChromeVisible = true;
+  bool _videoRoomActionsExpanded = false;
+  Timer? _videoRoomChromeHideTimer;
+  String? _videoRoomChromeSessionId;
   bool _guestPreviewJoinInFlight = false;
   bool _guestPreviewExpired = false;
   DateTime? _guestPreviewEndsAt;
@@ -352,6 +360,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _browseListRefreshTimer?.cancel();
     _pollClearTimer?.cancel();
     _guestPreviewCountdownTimer?.cancel();
+    _cancelVideoRoomChromeHideTimer();
     for (final timer in _speakingDecayTimers.values) {
       timer.cancel();
     }
@@ -381,7 +390,79 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   SocketService get _socket => _socketRef ?? ref.read(socketServiceProvider);
 
   void _handleCommentFocusChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    _syncVideoRoomChromeWithActivity();
+    setState(() {});
+  }
+
+  bool _videoRoomChromePinned({bool? isCommenting, String? socketStatus}) {
+    if (!_roomUsesVideo) return false;
+    final commenting =
+        isCommenting ??
+        (_commentFocusNode.hasFocus || MediaQuery.viewInsetsOf(context).bottom > 0);
+    final status = socketStatus ?? _socketStatus;
+    return commenting || status != 'connected' || _videoRoomPageIndex == 1;
+  }
+
+  void _cancelVideoRoomChromeHideTimer() {
+    _videoRoomChromeHideTimer?.cancel();
+    _videoRoomChromeHideTimer = null;
+  }
+
+  void _resetVideoRoomChromeSession() {
+    _videoRoomChromeSessionId = null;
+    _cancelVideoRoomChromeHideTimer();
+    _videoRoomChromeVisible = true;
+    _videoRoomActionsExpanded = false;
+  }
+
+  void _toggleVideoRoomActions() {
+    if (!_roomUsesVideo || _activeRoom == null) return;
+    setState(() => _videoRoomActionsExpanded = !_videoRoomActionsExpanded);
+  }
+
+  void _ensureVideoRoomChromeAutoHide() {
+    final roomId = '${_activeRoom?['id'] ?? ''}';
+    if (roomId.isEmpty || !_roomUsesVideo) return;
+    if (_videoRoomChromeSessionId == roomId) return;
+    _videoRoomChromeSessionId = roomId;
+    _videoRoomChromeVisible = true;
+    _revealVideoRoomChrome();
+  }
+
+  void _revealVideoRoomChrome({bool restartHideTimer = true}) {
+    if (!mounted || !_roomUsesVideo) return;
+    if (_videoRoomChromePinned()) {
+      _cancelVideoRoomChromeHideTimer();
+      if (!_videoRoomChromeVisible) {
+        setState(() => _videoRoomChromeVisible = true);
+      }
+      return;
+    }
+    if (!_videoRoomChromeVisible) {
+      setState(() => _videoRoomChromeVisible = true);
+    }
+    if (restartHideTimer) {
+      _scheduleVideoRoomChromeHide();
+    }
+  }
+
+  void _scheduleVideoRoomChromeHide() {
+    _cancelVideoRoomChromeHideTimer();
+    if (!mounted || !_roomUsesVideo || _videoRoomChromePinned()) return;
+    _videoRoomChromeHideTimer = Timer(_videoRoomChromeHideDelay, () {
+      if (!mounted || _videoRoomChromePinned()) return;
+      setState(() => _videoRoomChromeVisible = false);
+    });
+  }
+
+  void _syncVideoRoomChromeWithActivity() {
+    if (!_roomUsesVideo || _activeRoom == null) return;
+    if (_videoRoomChromePinned()) {
+      _revealVideoRoomChrome(restartHideTimer: false);
+      return;
+    }
+    _revealVideoRoomChrome();
   }
 
   Future<void> _loadMyCommentTheme() async {
@@ -416,12 +497,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   }
 
   Future<void> _saveMyMicEffect(String value) async {
-    final normalized = value.trim().toLowerCase();
-    if (!_liveMicEffects.contains(normalized)) return;
+    final normalized = _normalizeMicEffect(value);
     final prefs = await ref.read(sharedPreferencesProvider.future);
     await prefs.setString(StorageKeys.liveMicEffect, normalized);
     if (!mounted) return;
     setState(() => _myMicEffect = normalized);
+    _syncMyMicEffectToRoom();
   }
 
   void _syncRoomChromeState() {
@@ -931,6 +1012,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _socket.on('live:rtc:ice', _onRtcIce);
     _socket.on('live:speaking', _onSpeaking);
     _socket.on('live:speaker:mute:update', _onSpeakerMuteUpdate);
+    _socket.on('live:mic:effect:update', _onMicEffectUpdate);
     _socket.on('live:reaction', _onReaction);
     _socket.on('live:notice', _onLiveNotice);
     _socket.on('live:poll:update', _onLivePollUpdate);
@@ -953,6 +1035,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _socket.off('live:rtc:ice', _onRtcIce);
     _socket.off('live:speaking', _onSpeaking);
     _socket.off('live:speaker:mute:update', _onSpeakerMuteUpdate);
+    _socket.off('live:mic:effect:update', _onMicEffectUpdate);
     _socket.off('live:reaction', _onReaction);
     _socket.off('live:notice', _onLiveNotice);
     _socket.off('live:poll:update', _onLivePollUpdate);
@@ -1045,6 +1128,114 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (muted) {
       _activeSpeakers.remove(userId);
     }
+  }
+
+  List<dynamic> _mergeSpeakerMicEffects(
+    List<dynamic> incomingSpeakers,
+    List<dynamic> previousSpeakers,
+  ) {
+    final previousByUserId = <String, String>{};
+    for (final speaker in previousSpeakers) {
+      if (speaker is! Map) continue;
+      final userId = '${speaker['userId'] ?? ''}'.trim();
+      final effect = _normalizeMicEffect('${speaker['micEffect'] ?? ''}');
+      if (userId.isNotEmpty) {
+        previousByUserId[userId] = effect;
+      }
+    }
+    return incomingSpeakers
+        .map<dynamic>((item) {
+          if (item is! Map) return item;
+          final next = Map<String, dynamic>.from(item);
+          final userId = '${next['userId'] ?? ''}'.trim();
+          final incomingRaw = '${next['micEffect'] ?? ''}'.trim().toLowerCase();
+          if (_liveMicEffects.contains(incomingRaw)) {
+            next['micEffect'] = incomingRaw;
+            return next;
+          }
+          if (userId.isNotEmpty && previousByUserId.containsKey(userId)) {
+            next['micEffect'] = previousByUserId[userId];
+          }
+          return next;
+        })
+        .toList(growable: false);
+  }
+
+  void _applyMicEffectStateLocally({
+    required String userId,
+    required String micEffect,
+  }) {
+    final room = _activeRoom;
+    if (room == null || userId.isEmpty) return;
+    final normalized = _normalizeMicEffect(micEffect);
+    final speakers = (room['speakers'] as List<dynamic>? ?? const [])
+        .map<dynamic>(
+          (item) => item is Map ? Map<String, dynamic>.from(item) : item,
+        )
+        .toList(growable: true);
+    var found = false;
+    for (var i = 0; i < speakers.length; i++) {
+      final speaker = speakers[i];
+      if (speaker is! Map) continue;
+      if ('${speaker['userId'] ?? ''}' != userId) continue;
+      found = true;
+      final next = Map<String, dynamic>.from(speaker);
+      next['micEffect'] = normalized;
+      speakers[i] = next;
+      break;
+    }
+    if (!found) {
+      final hostUserId = _resolveHostUserId(room);
+      if (userId == hostUserId) {
+        speakers.insert(0, <String, dynamic>{
+          'userId': userId,
+          'name': '${room['host'] ?? 'Host'}',
+          'photo': '${room['hostPhoto'] ?? ''}',
+          'role': 'Host',
+          'occupied': true,
+          'micEffect': normalized,
+        });
+        found = true;
+      }
+    }
+    if (found) {
+      _activeRoom = {...room, 'speakers': speakers};
+    }
+  }
+
+  void _emitMicEffectUpdate(String micEffect) {
+    final room = _activeRoom;
+    if (room == null || !_socket.isConnected || _meId.isEmpty) return;
+    if (!_isUserOnStage(_meId)) return;
+    _socket.emit('live:mic:effect:update', <String, dynamic>{
+      'broadcastId': room['id'],
+      'userId': _meId,
+      'micEffect': _normalizeMicEffect(micEffect),
+    });
+  }
+
+  void _syncMyMicEffectToRoom() {
+    if (_activeRoom == null || _meId.isEmpty || !_isUserOnStage(_meId)) return;
+    final micEffect = _micEffectName;
+    setState(() {
+      _applyMicEffectStateLocally(userId: _meId, micEffect: micEffect);
+    });
+    _syncRoomChromeState();
+    _emitMicEffectUpdate(micEffect);
+  }
+
+  void _onMicEffectUpdate(dynamic data) {
+    if (data is! Map || !mounted || _activeRoom == null) return;
+    final payload = Map<String, dynamic>.from(data);
+    final broadcastId = '${payload['broadcastId'] ?? ''}';
+    if ('${_activeRoom!['id']}' != broadcastId) return;
+    final userId = '${payload['userId'] ?? ''}'.trim();
+    if (userId.isEmpty) return;
+    final micEffect = _normalizeMicEffect('${payload['micEffect'] ?? ''}');
+    setState(() {
+      _applyMicEffectStateLocally(userId: userId, micEffect: micEffect);
+    });
+    _syncRoomChromeState();
   }
 
   void _onSpeakerMuteUpdate(dynamic data) {
@@ -1224,6 +1415,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           'meId="$_meId", '
           'match=${_meId == '${broadcast['hostUserId'] ?? ''}'}',
           name: 'live_screen',
+        );
+        final previousSpeakers =
+            (_activeRoom?['speakers'] as List<dynamic>? ?? const []);
+        broadcast['speakers'] = _mergeSpeakerMicEffects(
+          broadcast['speakers'] as List<dynamic>? ?? const [],
+          previousSpeakers,
         );
         _activeRoom = broadcast;
         _activeRoomVersion = math.max(
@@ -1564,6 +1761,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _localMicEnabled = !_usesSfuAudioPath;
         if (!_usesSfuAudioPath) {
           _optimisticallyPromoteSelfToStage();
+          _syncMyMicEffectToRoom();
         }
       }
     });
@@ -1644,7 +1842,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _syncRoomChromeState();
     await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
     await _refreshLiveAudioPublishState();
-    await _ensureLiveSpeakerOutput();
+    _syncMyMicEffectToRoom();
     return true;
   }
 
@@ -1786,7 +1984,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           }
         });
       }
-      await _ensureLiveSpeakerOutput();
     }();
     _sfuConnectInFlight = connectFuture;
     try {
@@ -1830,30 +2027,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         _localMicEnabled = false;
       }
     });
-    await _ensureLiveSpeakerOutput();
-  }
-
-  /// Routes live playback to the loudspeaker when enabled. WebRTC and LiveKit
-  /// both reconfigure AVAudioSession during capture/connect, so this must run
-  /// after media starts — not only at room join.
-  Future<void> _ensureLiveSpeakerOutput() async {
-    if (_activeRoom == null || !mounted) return;
-    if (!_liveSpeakerOn) {
-      try {
-        await Helper.setSpeakerphoneOn(false);
-      } catch (_) {}
-      return;
-    }
-    try {
-      await Helper.setSpeakerphoneOn(true);
-    } catch (_) {}
-  }
-
-  Future<void> _toggleLiveSpeaker() async {
-    if (_activeRoom == null) return;
-    _liveSpeakerOn = !_liveSpeakerOn;
-    await _ensureLiveSpeakerOutput();
-    if (mounted) setState(() {});
   }
 
   Future<bool> _createBroadcast(
@@ -1904,6 +2077,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         'host': me.displayName,
         'hostPhoto': me.profilePhotoUrl,
         'hostNationalityCode': me.nationalityCode,
+        'micEffect': _micEffectName,
       },
       timeout: const Duration(seconds: 6),
       maxAttempts: 2,
@@ -1956,7 +2130,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       });
       _syncRoomChromeState();
       unawaited(_refreshHostFollowState(broadcast));
-      _liveSpeakerOn = true;
       _showSavedJoinNoticeIfNeeded(broadcast);
       if (_usesSfuAudioPath) {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
@@ -1964,7 +2137,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       } else if (!_roomUsesVideo) {
         await _syncRtcParticipants();
       }
-      await _ensureLiveSpeakerOutput();
+      _syncMyMicEffectToRoom();
       return true;
     }
     if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
@@ -2041,7 +2214,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       _syncRoomChromeState();
       _syncBrowseListRefreshTimer();
       unawaited(_refreshHostFollowState(broadcast));
-      _liveSpeakerOn = true;
       if (_usesSfuAudioPath) {
         await _connectLiveAudioSfu(room: broadcast, mediaSession: mediaSession);
         await _refreshLiveAudioPublishState();
@@ -2053,7 +2225,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         await _syncRtcParticipants();
         unawaited(_refreshRoomTopologyAfterJoin());
       }
-      await _ensureLiveSpeakerOutput();
+      _syncMyMicEffectToRoom();
       return;
     }
     if (payload is Map && payload['code'] == 'auth_identity_mismatch') {
@@ -2302,7 +2474,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (!mounted) return;
     setState(() {
       _activeRoom = null;
-      _videoRoomChromeVisible = true;
+      _resetVideoRoomChromeSession();
       _lastShownNoticeId = null;
       _activeRoomVersion = 0;
       _activeSpeakerVersion = 0;
@@ -2941,10 +3113,19 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (userId.isEmpty) return false;
     final room = _activeRoom;
     if (room == null) return false;
+    final hostUserId = _resolveHostUserId(room);
+    if (hostUserId.isNotEmpty && userId == hostUserId) return true;
     final speakers = (room['speakers'] as List<dynamic>? ?? const []);
     return speakers.any(
       (item) => item is Map && '${item['userId'] ?? ''}' == userId,
     );
+  }
+
+  String? _stageSeatMicEffect(Map<String, dynamic>? seat) {
+    if (seat == null) return null;
+    final raw = '${seat['micEffect'] ?? ''}'.trim().toLowerCase();
+    if (!_liveMicEffects.contains(raw)) return null;
+    return raw;
   }
 
   Future<void> _refreshActiveRoomViaJoin() async {
@@ -3138,6 +3319,8 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       'role': 'Host',
       'occupied': true,
       'muted': hostFromSpeakers?['muted'] == true,
+      if (_stageSeatMicEffect(hostFromSpeakers) != null)
+        'micEffect': _stageSeatMicEffect(hostFromSpeakers)!,
     };
 
     final normalizedSpeakers = <Map<String, dynamic>?>[];
@@ -3558,6 +3741,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       'role': 'Speaker',
       'occupied': true,
       'muted': !_localMicEnabled,
+      'micEffect': _micEffectName,
     };
 
     final audience = (room['audienceMembers'] as List<dynamic>? ?? const [])
@@ -3935,7 +4119,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       }
       if (event.track.kind == 'audio') {
         _markInboundAudioDetected();
-        await _ensureLiveSpeakerOutput();
       }
       if (mounted) setState(() {});
     };
@@ -4068,7 +4251,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         await _pruneOffStageVideoRenderers();
         unawaited(_syncHostHeroVideo());
       }
-      await _ensureLiveSpeakerOutput();
       return;
     }
     final existingIds = _peerConnections.keys.toList();
@@ -4125,7 +4307,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       await _pruneOffStageVideoRenderers();
       unawaited(_syncHostHeroVideo());
     }
-    await _ensureLiveSpeakerOutput();
     if (mounted) setState(() {});
   }
 
@@ -4458,7 +4639,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     if (_roomUsesVideo) {
       unawaited(_pruneOffStageVideoRenderers());
     }
-    unawaited(_ensureLiveSpeakerOutput());
   }
 
   Future<void> _onRtcOffer(dynamic data) async {
@@ -4514,7 +4694,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     _remoteDescriptionReady.add(fromUserId);
     _peerStates[fromUserId] = 'connected';
     await _flushPendingIce(fromUserId);
-    await _ensureLiveSpeakerOutput();
   }
 
   Future<void> _onRtcIce(dynamic data) async {
@@ -4816,6 +4995,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     bool refreshFollowState = false,
   }) {
     final broadcast = _normalizeBroadcast(room);
+    final previousSpeakers =
+        (_activeRoom?['speakers'] as List<dynamic>? ?? const []);
+    broadcast['speakers'] = _mergeSpeakerMicEffects(
+      broadcast['speakers'] as List<dynamic>? ?? const [],
+      previousSpeakers,
+    );
     setState(() {
       _activeRoom = broadcast;
       _activeRoomVersion = math.max(
@@ -6260,7 +6445,11 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         Theme.of(context).platform == TargetPlatform.iOS ? safeAreaBottom : 0.0;
     final composerTop = 56 + composerBottomPadding + iPhoneCommentClearance;
     final pageTop = topInset + (socketStatus == 'connected' ? 118.0 : 160.0);
-    final chromePinned = isCommenting || socketStatus != 'connected';
+    _ensureVideoRoomChromeAutoHide();
+    final chromePinned = _videoRoomChromePinned(
+      isCommenting: isCommenting,
+      socketStatus: socketStatus,
+    );
     final showChrome = chromePinned || _videoRoomChromeVisible;
 
     return MediaQuery.removePadding(
@@ -6270,13 +6459,23 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
         fit: StackFit.expand,
         children: [
           Positioned.fill(child: _buildLiveVideoGrid(theme)),
+          if (!showChrome)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _revealVideoRoomChrome,
+                onPanDown: (_) => _revealVideoRoomChrome(),
+              ),
+            ),
           IgnorePointer(
             ignoring: !showChrome,
             child: AnimatedOpacity(
               opacity: showChrome ? 1 : 0,
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
-              child: Stack(
+              child: Listener(
+                onPointerDown: (_) => _syncVideoRoomChromeWithActivity(),
+                child: Stack(
                 fit: StackFit.expand,
                 children: [
                   Positioned(
@@ -6301,10 +6500,10 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                   PageView(
                     key: const PageStorageKey<String>('video-room-pages'),
                     controller: _videoRoomPageController,
-                    onPageChanged: (index) => setState(() {
-                      _videoRoomPageIndex = index;
-                      if (index == 1) _videoRoomChromeVisible = true;
-                    }),
+                    onPageChanged: (index) {
+                      setState(() => _videoRoomPageIndex = index);
+                      _syncVideoRoomChromeWithActivity();
+                    },
                     children: [
                       const SizedBox.expand(),
                       _buildVideoCommentsScreen(
@@ -6324,7 +6523,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                   ),
                   Positioned(
                     left: 16,
-                    right: 56,
+                    right: 16,
                     top: topInset + 6,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -6362,13 +6561,6 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                   Positioned(
                     left: 16,
                     right: 16,
-                    bottom:
-                        120 + composerBottomPadding + iPhoneCommentClearance,
-                    child: _buildImmersiveTopActions(theme),
-                  ),
-                  Positioned(
-                    left: 16,
-                    right: 16,
                     bottom: composerBottomPadding,
                     child: _buildImmersiveComposer(
                       theme,
@@ -6377,23 +6569,15 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
                     ),
                   ),
                 ],
+                ),
               ),
             ),
           ),
           Positioned(
-            top: topInset + 8,
-            right: 12,
-            child: _VideoRoomChromeToggle(
-              chromeVisible: showChrome,
-              pinned: chromePinned,
-              onPressed: () {
-                if (chromePinned) return;
-                HapticFeedback.selectionClick();
-                setState(
-                  () => _videoRoomChromeVisible = !_videoRoomChromeVisible,
-                );
-              },
-            ),
+            left: 16,
+            right: 16,
+            bottom: 120 + composerBottomPadding + iPhoneCommentClearance,
+            child: _buildVideoRoomActionControls(theme),
           ),
         ],
       ),
@@ -7332,7 +7516,7 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       accentBadge: false,
       muted: muted,
       roleLabel: occupied ? roleLabel : '',
-      micEffect: _micEffectName,
+      micEffect: _stageSeatMicEffect(seat),
       speaking: occupied && !muted && _activeSpeakers.contains(userId),
       compact: true,
       onTap: occupied && userId.isNotEmpty ? () => _openProfile(userId) : null,
@@ -7394,12 +7578,12 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
     );
   }
 
-  Widget _buildImmersiveTopActions(ThemeData theme) {
+  List<Widget> _immersiveActionButtons(ThemeData theme) {
     final isHost = _isHost;
     final pendingJoinRequestBadge = isHost && _pendingJoinRequestCount > 0
         ? _pendingJoinRequestCountLabel
         : null;
-    final actions = <Widget>[
+    return <Widget>[
       _SideRailButton(icon: Icons.share_outlined, onTap: _shareRoom),
       _SideRailButton(
         icon: (!isHost && !_amOnStage && _handRaised)
@@ -7466,31 +7650,64 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
           icon: Icons.favorite_rounded,
           onTap: () => _sendReaction('❤️'),
         ),
-      _SideRailButton(
-        icon: _liveSpeakerOn ? Icons.volume_up_rounded : Icons.hearing_rounded,
-        isActive: _liveSpeakerOn,
-        onTap: () {
-          unawaited(_toggleLiveSpeaker());
-        },
-      ),
     ];
+  }
+
+  Widget _buildImmersiveActionButtonRail(ThemeData theme) {
+    final actions = _immersiveActionButtons(theme);
+    return SizedBox(
+      height: 48,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        itemCount: actions.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        itemBuilder: (context, index) => actions[index],
+      ),
+    );
+  }
+
+  Widget _buildVideoRoomActionControls(ThemeData theme) {
+    final expanded = _videoRoomActionsExpanded;
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Expanded(
-          child: SizedBox(
-            height: 48,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              itemCount: actions.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 10),
-              itemBuilder: (context, index) => actions[index],
+          child: AnimatedOpacity(
+            opacity: expanded ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            child: IgnorePointer(
+              ignoring: !expanded,
+              child: _buildImmersiveActionButtonRail(theme),
             ),
           ),
         ),
+        if (expanded) ...[
+          const SizedBox(width: 12),
+          _LiveExitButton(
+            isHost: _isHost,
+            onTap: () {
+              unawaited(_confirmLeaveBroadcast());
+            },
+          ),
+        ],
+        const SizedBox(width: 8),
+        _VideoRoomActionsMenuButton(
+          expanded: expanded,
+          onTap: _toggleVideoRoomActions,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildImmersiveTopActions(ThemeData theme) {
+    return Row(
+      children: [
+        Expanded(child: _buildImmersiveActionButtonRail(theme)),
         const SizedBox(width: 12),
         _LiveExitButton(
-          isHost: isHost,
+          isHost: _isHost,
           onTap: () {
             unawaited(_confirmLeaveBroadcast());
           },
@@ -8653,7 +8870,7 @@ class _LiveRoomAppearanceSheetState extends State<_LiveRoomAppearanceSheet> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  'Applies only to your own mic animation.',
+                  'Applies only to your seat. Everyone in the room sees your choice.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -9380,7 +9597,7 @@ class _ImmersiveSeat extends StatelessWidget {
     this.roleLabel = '',
     this.speaking = false,
     this.muted = false,
-    this.micEffect = 'pulse',
+    this.micEffect,
     this.compact = false,
     this.onTap,
     this.onLongPress,
@@ -9395,7 +9612,7 @@ class _ImmersiveSeat extends StatelessWidget {
   final String roleLabel;
   final bool speaking;
   final bool muted;
-  final String micEffect;
+  final String? micEffect;
   final bool compact;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
@@ -9403,24 +9620,30 @@ class _ImmersiveSeat extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final effectColor = _micEffectColor(micEffect);
+    final hasCustomEffect =
+        micEffect != null && _liveMicEffects.contains(micEffect);
+    final effectColor = hasCustomEffect ? _micEffectColor(micEffect!) : null;
+    final idleBorderColor = Colors.white.withValues(alpha: 0.12);
+    final activeBorderColor = speaking
+        ? (effectColor ?? Colors.white.withValues(alpha: 0.78))
+        : occupied
+        ? (effectColor?.withValues(alpha: 0.42) ?? idleBorderColor)
+        : idleBorderColor;
     final card = Container(
       padding: EdgeInsets.all(compact ? 6 : 8),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: occupied ? 0.22 : 0.14),
         borderRadius: BorderRadius.circular(compact ? 18 : 22),
         border: Border.all(
-          color: speaking
-              ? effectColor
-              : occupied
-              ? effectColor.withValues(alpha: 0.42)
-              : Colors.white.withValues(alpha: 0.12),
+          color: activeBorderColor,
           width: speaking ? 2.2 : 1,
         ),
-        boxShadow: occupied
+        boxShadow: occupied && hasCustomEffect
             ? [
                 BoxShadow(
-                  color: effectColor.withValues(alpha: speaking ? 0.32 : 0.12),
+                  color: effectColor!.withValues(
+                    alpha: speaking ? 0.32 : 0.12,
+                  ),
                   blurRadius: speaking ? 24 : 14,
                   spreadRadius: speaking ? 1.4 : 0.2,
                 ),
@@ -9484,13 +9707,15 @@ class _ImmersiveSeat extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: muted
                             ? const Color(0xFFB3261E)
-                            : effectColor.withValues(alpha: 0.78),
+                            : hasCustomEffect
+                            ? effectColor!.withValues(alpha: 0.78)
+                            : Colors.white.withValues(alpha: 0.18),
                         borderRadius: BorderRadius.circular(10),
-                        boxShadow: muted
+                        boxShadow: muted || !hasCustomEffect
                             ? null
                             : [
                                 BoxShadow(
-                                  color: effectColor.withValues(alpha: 0.38),
+                                  color: effectColor!.withValues(alpha: 0.38),
                                   blurRadius: 12,
                                   spreadRadius: 0.8,
                                 ),
@@ -9880,43 +10105,46 @@ class _ImmersiveCommentBubble extends StatelessWidget {
   }
 }
 
-class _VideoRoomChromeToggle extends StatelessWidget {
-  const _VideoRoomChromeToggle({
-    required this.chromeVisible,
-    required this.pinned,
-    required this.onPressed,
+class _VideoRoomActionsMenuButton extends StatelessWidget {
+  const _VideoRoomActionsMenuButton({
+    required this.expanded,
+    required this.onTap,
   });
 
-  final bool chromeVisible;
-  final bool pinned;
-  final VoidCallback onPressed;
+  final bool expanded;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final icon = chromeVisible
-        ? Icons.visibility_off_outlined
-        : Icons.visibility_outlined;
-    final tooltip = chromeVisible ? 'Hide controls' : 'Show controls';
-    return Tooltip(
-      message: pinned ? 'Controls stay visible while typing' : tooltip,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: pinned ? null : onPressed,
-          borderRadius: BorderRadius.circular(999),
-          child: Ink(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: pinned ? 0.22 : 0.38),
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        borderRadius: BorderRadius.circular(12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: expanded
+                ? Colors.white.withValues(alpha: 0.14)
+                : Colors.white.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: expanded
+                  ? Colors.white.withValues(alpha: 0.22)
+                  : Colors.white.withValues(alpha: 0.1),
             ),
-            child: Icon(
-              pinned ? Icons.push_pin_outlined : icon,
-              color: Colors.white.withValues(alpha: pinned ? 0.55 : 0.92),
-              size: 20,
-            ),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            Icons.apps_rounded,
+            size: 20,
+            color: Colors.white.withValues(alpha: expanded ? 0.92 : 0.62),
           ),
         ),
       ),
