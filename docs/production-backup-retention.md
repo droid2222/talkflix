@@ -535,3 +535,43 @@ https://api.talkflix.cc/health returned {"ok":true}
 https://www.talkflix.cc/ returned HTTP 200
 https://talkflix.cc/admin/ returned HTTP 200
 ```
+
+### 2026-06-11 Web Pro Stripe Checkout
+
+Reason:
+
+- Deployed the web payment split for Talkflix Pro: mobile keeps Apple/Google IAP, web uses Stripe Checkout.
+- Added backend Pro Stripe checkout/session handling and the `stripe_pro_subscriptions` production table path.
+- Deployed a guarded Flutter web build without replacing the static public homepage.
+
+Production backup created:
+
+```text
+/root/talkflix-production-backups/20260611-web-pro-stripe/
+```
+
+Backup contents:
+
+```text
+/root/talkflix-production-backups/20260611-web-pro-stripe/server.js.before
+/root/talkflix-production-backups/20260611-web-pro-stripe/talkflix-web-before.tar.gz
+```
+
+Deployed files:
+
+```text
+/opt/talkflix-api/server.js
+/opt/talkflix-api/migrations/006_stripe_pro_subscriptions_mysql.sql
+/var/www/talkflix-web
+```
+
+Verification performed:
+
+```text
+node --check /opt/talkflix-api/server.js: passed
+pm2 restart talkflix-api --update-env: passed
+https://www.talkflix.cc/ returned HTTP 200
+https://www.talkflix.cc/app/upgrade?feature=Direct%20calling returned HTTP 200
+https://api.talkflix.cc/billing/pro/stripe-plans returned checkoutAvailable=true and monthly/six-month/yearly Stripe plans
+POST https://api.talkflix.cc/billing/pro/stripe-checkout-sessions without auth returned Unauthorized
+```

@@ -61,6 +61,14 @@ Production deployment status on 2026-06-07:
 - Production backup: `/root/talkflix-production-backups/20260607-pro-entitlements/`.
 - Admin dashboard HTML deployed to `/var/www/talkflix-admin/index.html` with a production backup named `index.html.backup-<timestamp>-pro-limits`.
 
+Production deployment status on 2026-06-11:
+
+- Web Pro checkout deployed with mobile/web payment split: iOS and Android use native IAP; web uses Stripe Checkout.
+- Backend deployed to `/opt/talkflix-api/server.js` and PM2 restarted with `--update-env`.
+- Flutter web build deployed to `/var/www/talkflix-web` with the guarded homepage-preserving build flow.
+- Production backup: `/root/talkflix-production-backups/20260611-web-pro-stripe/`.
+- Live verification: `https://www.talkflix.cc/`, `https://www.talkflix.cc/app/upgrade?feature=Direct%20calling`, and `https://api.talkflix.cc/billing/pro/stripe-plans` returned 200/valid JSON after deployment.
+
 ## Enforcement
 
 - Direct calls: `socket.js` checks remaining free direct-call seconds before ringing another user. The server starts a timer when the call connects and ends the call when the free daily allowance is exhausted.
